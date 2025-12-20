@@ -1,0 +1,16 @@
+torch
+torchvision
+numpy
+pandas
+scikit-learn
+scikit-image
+opencv-python
+Pillow
+tqdm
+matplotlib
+seaborn
+tensorboard
+timm
+ttach
+huggingface_hub
+pytorch_grad_cam
