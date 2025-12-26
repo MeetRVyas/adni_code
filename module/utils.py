@@ -72,7 +72,7 @@ class Logger:
         self.logger.warning(message)
 
     def error(self, message: str) -> None:
-        self.logger.error(message, exc_info=True)
+        self.logger.error(message, exc_info = True)
     
     def debug(self, message: str) -> None:
         self.logger.debug(message)
