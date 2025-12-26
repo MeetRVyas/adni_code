@@ -19,6 +19,11 @@ from tqdm import tqdm
 import gc
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Detected call of `lr_scheduler.step()`"
+)
 
 class Cross_Validator:
     """
@@ -36,8 +41,8 @@ class Cross_Validator:
         self.results = []
         self.use_aug = use_aug
         self.logger = logger
-        self.master_file = os.path.join(OUTPUT_DIR, "master_results.csv")
-        self.models_dir = os.path.join(OUTPUT_DIR, "best_models")
+        self.master_file = os.path.join(RESULTS_DIR, "master_results.csv")
+        self.models_dir = os.path.join(RESULTS_DIR, "best_models")
 
         os.makedirs(self.models_dir, exist_ok=True)
         self.logger.debug(f"Models for cross-validation: {self.model_names}")
@@ -71,6 +76,7 @@ class Cross_Validator:
                 ]
                 if not existing.empty:
                     self.logger.info(">> Experiment already completed. Skipping.")
+                    self.logger.info(existing.to_string())
                     self.logger.info("="*80)
                     continue
 
@@ -163,6 +169,9 @@ class Cross_Validator:
                     final_div_factor=100.0
                 )
 
+                self.logger.debug(f"Using scaler -> {scaler}")
+                self.logger.debug(f"Using scheduler -> {scheduler}")
+
                 best_acc = 0.0
                 training_history = []
                 best_stats = {}
@@ -191,7 +200,7 @@ class Cross_Validator:
 
                     # Save best model
                     if v_acc > best_acc:
-                        self.logger.debug(f"New best validation accuracy: {v_acc:.2f}%")
+                        self.logger.debug(f"[{v_acc:.2f}] New best validation accuracy for model {model_name}")
                         best_acc = v_acc
                         best_stats = {
                             'val_acc': v_acc, 'val_loss': v_loss,
@@ -243,7 +252,7 @@ class Cross_Validator:
             )
 
             final_accuracy = metrics["accuracy"]
-            self.logger.info(f"Final test accuracy: {final_accuracy:.2f}%")
+            self.logger.info(f"[{final_accuracy:.2f}%] Final test accuracy")
             
             # Aggregate fold results
             aggregate_fold_results = {}
@@ -285,6 +294,4 @@ class Cross_Validator:
             torch.cuda.empty_cache()
             gc.collect()
         
-        # Archive results
-        zip_and_empty(OUTPUT_DIR, "result.zip")
         self.logger.info("\n>>> Batch Complete.")
