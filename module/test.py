@@ -11,10 +11,6 @@ from sklearn.metrics import (
 import os
 import torch
 import numpy as np
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-from tqdm import tqdm
 from config import DEVICE, REPORTS_DIR, NUM_SAMPLES_TO_ANALYSE
 from visualization import Visualizer
 from utils import Logger
@@ -53,7 +49,7 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
     
     # Inference loop with proper memory management
     with torch.inference_mode():
-        for images, labels in tqdm(loader, desc="Testing"):
+        for images, labels in loader :
             images = images.to(DEVICE, non_blocking=True)
             labels = labels.to(DEVICE, non_blocking=True)
             

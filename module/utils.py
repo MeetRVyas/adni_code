@@ -71,8 +71,8 @@ class Logger:
     def warning(self, message: str) -> None:
         self.logger.warning(message)
 
-    def error(self, message: str) -> None:
-        self.logger.error(message, exc_info = True)
+    def error(self, message: str, exc_info : bool = True) -> None:
+        self.logger.error(message, exc_info)
     
     def debug(self, message: str) -> None:
         self.logger.debug(message)
@@ -101,7 +101,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, gpu_augmenter=N
     all_preds = []
     all_labels = []
     
-    for images, labels in tqdm(loader, desc="   Training", leave=False):
+    for images, labels in loader :
         images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
         
         if gpu_augmenter:
@@ -147,7 +147,7 @@ def validate_one_epoch(model, loader, criterion):
     all_labels = []
     
     with torch.inference_mode():
-        for images, labels in tqdm(loader, desc="   Validating", leave=False):
+        for images, labels in loader :
             images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
             
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):

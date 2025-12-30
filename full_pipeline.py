@@ -206,7 +206,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, gpu_augmenter=N
     all_preds = []
     all_labels = []
     
-    for images, labels in tqdm(loader, desc="   Training", leave=False):
+    for images, labels in loader:
         images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
         
         if gpu_augmenter:
@@ -245,7 +245,7 @@ def validate_one_epoch(model, loader, criterion):
     all_labels = []
     
     with torch.inference_mode():
-        for images, labels in tqdm(loader, desc="   Validating", leave=False):
+        for images, labels in loader:
             images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
             
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):
@@ -342,17 +342,25 @@ class NativeGradCAM:
         self.hooks.append(target_layer.register_full_backward_hook(self.save_gradient))
 
     def save_activation(self, module, input, output):
-        self.activations = output
+        # Clone to avoid inplace modification issues
+        self.activations = output.clone() if isinstance(output, torch.Tensor) else output
 
     def save_gradient(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0]
+        # Clone to avoid inplace modification issues
+        self.gradients = grad_output[0].clone() if isinstance(grad_output[0], torch.Tensor) else grad_output[0]
 
     def __call__(self, input_tensor):
         self.model.zero_grad()
-        output = self.model(input_tensor)
-        pred_index = output.argmax(dim=1)
-        score = output[:, pred_index]
-        score.backward()
+        
+        # Ensure model is in eval mode and disable inplace operations
+        self.model.eval()
+        
+        with torch.enable_grad():
+            input_tensor = input_tensor.clone().detach().requires_grad_(True)
+            output = self.model(input_tensor)
+            pred_index = output.argmax(dim=1)
+            score = output[:, pred_index]
+            score.backward()
         
         grads = self.gradients
         fmaps = self.activations
@@ -415,8 +423,9 @@ class Visualizer:
         else:
             print(msg)
 
-    # ========== STANDARD PLOTS (No internal try-except) ==========
-    
+    # =========================================================================
+    # Plots
+    # =========================================================================
     def plot_training_history(self, history):
         if not history:
             return
@@ -486,6 +495,8 @@ class Visualizer:
                     'Recall': report[cls]['recall'],
                     'F1-Score': report[cls]['f1-score']
                 })
+            else:
+                self.logger.error(f"Class {cls} not found in classification report\n{report}")
         
         if not metrics_list:
             raise ValueError("No valid class metrics found")
@@ -505,15 +516,30 @@ class Visualizer:
         n_classes = len(self.class_names)
         y_true_bin = pd.get_dummies(y_true).values
         
+        # Check for NaN in y_prob
+        if np.isnan(y_prob).any():
+            self.log(f"⚠️  Warning: NaN values detected in predictions. Replacing with 0.25 (1/n_classes)")
+            y_prob = np.nan_to_num(y_prob, nan=1.0/n_classes)
+        
         plt.figure(figsize=(10, 8))
         colors = cycle(['aqua', 'darkorange', 'cornflowerblue', 'green', 'red', 'purple'])
+
+        classes_plotted = 0
         
         for i, color in zip(range(n_classes), colors):
             if i < y_prob.shape[1]:
-                fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob[:, i])
-                auc_score = auc(fpr, tpr)
-                plt.plot(fpr, tpr, color=color, lw=2, 
-                         label=f'{self.class_names[i]} (AUC = {auc_score:0.2f})')
+                try:
+                    fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob[:, i])
+                    auc_score = auc(fpr, tpr)
+                    plt.plot(fpr, tpr, color=color, lw=2, 
+                             label=f'ROC of {self.class_names[i]} (AUC = {auc_score:0.2f})')
+                    classes_plotted += 1
+                except Exception as e:
+                    self.log(f"⚠️  Skipping ROC for {self.class_names[i]}: {e}")
+                    continue
+        
+        if classes_plotted == 0 :
+            raise ValueError("No ROC curve plotted for any of the classes")
         
         plt.plot([0, 1], [0, 1], 'k--', lw=2)
         plt.xlabel('False Positive Rate')
@@ -529,25 +555,38 @@ class Visualizer:
     def plot_precision_recall_curve(self, y_true, y_prob):
         n_classes = len(self.class_names)
         y_true_bin = pd.get_dummies(y_true).values
+        
+        # Check for NaN in y_prob
+        if np.isnan(y_prob).any():
+            self.log(f"⚠️  Warning: NaN values detected in predictions. Replacing with 0.25 (1/n_classes)")
+            y_prob = np.nan_to_num(y_prob, nan=1.0/n_classes)
     
         plt.figure(figsize=(10, 8))
         colors = cycle(['aqua', 'darkorange', 'cornflowerblue', 'green', 'red', 'purple'])
         
+        classes_plotted = 0
+        
         for i, color in zip(range(n_classes), colors):
             if i < y_prob.shape[1]:
-                prec, rec, _ = precision_recall_curve(y_true_bin[:, i], y_prob[:, i])
-                avg_prec = average_precision_score(y_true_bin[:, i], y_prob[:, i])
-                plt.plot(rec, prec, color=color, lw=2, 
-                         label=f'{self.class_names[i]} (AP = {avg_prec:0.2f})')
+                try:
+                    prec, rec, _ = precision_recall_curve(y_true_bin[:, i], y_prob[:, i])
+                    avg_prec = average_precision_score(y_true_bin[:, i], y_prob[:, i])
+                    plt.plot(rec, prec, color=color, lw=2, 
+                             label=f'{self.class_names[i]} (AP = {avg_prec:0.2f})')
+                    classes_plotted += 1
+                except Exception as e:
+                    self.log(f"⚠️  Skipping PR curve for {self.class_names[i]}: {e}")
+                    continue
+        
+        if classes_plotted == 0 :
+            raise ValueError("No PR curve plotted for any of the classes")
         
         plt.xlabel('Recall')
         plt.ylabel('Precision')
         plt.title(f'Precision-Recall Curves: {self.experiment_name}')
         plt.legend(loc="lower left")
         plt.grid(True, alpha=0.3)
-        
-        save_path = os.path.join(self.save_dir, "precision_recall_curve.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(self.save_dir, "precision_recall_curve.png"), dpi=300)
         plt.close()
 
     def plot_confidence_distribution(self, y_true, y_prob):
@@ -566,9 +605,9 @@ class Visualizer:
             sns.histplot(confidences[incorrect_mask], color='red', label='Incorrect Predictions', 
                          kde=True, bins=20, alpha=0.5, element="step")
             
-        plt.xlabel("Prediction Confidence")
+        plt.xlabel("Prediction Confidence (Probability)")
         plt.ylabel("Count")
-        plt.title("Confidence Distribution: Correct vs Incorrect")
+        plt.title(f"Confidence Distribution{' : Correct vs Incorrect' if np.any(incorrect_mask) else ''}")
         plt.legend()
         
         save_path = os.path.join(self.save_dir, "confidence_analysis.png")
@@ -611,8 +650,9 @@ class Visualizer:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
 
-    # ========== XAI METHODS ==========
-    
+    # =========================================================================
+    # XAI
+    # =========================================================================
     def _get_target_layer(self, model):
         try:
             if "swin" in self.model_name:
@@ -625,7 +665,11 @@ class Visualizer:
                 return model.features.norm5
             elif "convnext" in self.model_name:
                 return model.stages[-1].blocks[-1].norm
+            elif "mobilenet" in self.model_name:
+                # MobileNet has special handling for inplace operations
+                return model.conv_head
             else:
+                # Recursive fallback to last Conv2d
                 for name, module in list(model.named_modules())[::-1]:
                     if isinstance(module, torch.nn.Conv2d):
                         return module
@@ -635,6 +679,18 @@ class Visualizer:
         return None
 
     def run_grad_cam(self, model, image_path, target_layer):
+        # Disable inplace operations for models like MobileNetV3
+        def set_inplace_false(m):
+            for attr in dir(m):
+                if 'inplace' in attr:
+                    try:
+                        setattr(m, attr, False)
+                    except:
+                        pass
+        
+        model.apply(set_inplace_false)
+        model.eval()
+        
         pil_img = Image.open(image_path).convert('RGB').resize((self.img_size, self.img_size))
         input_tensor = self.transform(pil_img).unsqueeze(0).to(DEVICE)
         original_img_np = np.array(pil_img)
@@ -652,21 +708,36 @@ class Visualizer:
             batch = torch.stack([self.transform(img) for img in pil_images], dim=0).to(DEVICE)
             
             with torch.inference_mode():
+                model.eval()
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):
                     logits = model(batch)
-                probs = F.softmax(logits, dim=1)
-            
-            return probs.cpu().numpy()
+                probs = F.softmax(logits, dim=1).cpu().numpy()
+                
+                # Handle NaN in predictions
+                if np.isnan(probs).any():
+                    n_classes = probs.shape[1]
+                    probs = np.nan_to_num(probs, nan=1.0/n_classes)
+                    # Normalize to ensure sum=1
+                    probs = probs / probs.sum(axis=1, keepdims=True)
+                
+                return probs
         
         image_np = np.array(Image.open(image_path).convert('RGB').resize((self.img_size, self.img_size)))
         explainer = lime_image.LimeImageExplainer()
         
         explanation = explainer.explain_instance(
-            image_np, batch_predict, top_labels=1, hide_color=0, num_samples=300
+            image_np, 
+            batch_predict, 
+            top_labels=1, 
+            hide_color=0, 
+            num_samples=300
         )
         
         temp, mask = explanation.get_image_and_mask(
-            explanation.top_labels[0], positive_only=True, num_features=5, hide_rest=False
+            explanation.top_labels[0], 
+            positive_only=True, 
+            num_features=5, 
+            hide_rest=False
         )
         
         lime_viz = mark_boundaries(temp / 255.0, mask)
@@ -708,17 +779,12 @@ class Visualizer:
         
         original_img = np.array(Image.open(image_path).convert('RGB').resize((self.img_size, self.img_size)))
         image_basename = os.path.splitext(os.path.basename(image_path))[0]
-        
         self.log(f"  Generating XAI comparison for {image_basename}...")
         
         target_layer = self._get_target_layer(model)
         
         # Try each XAI method independently
-        xai_results = {
-            'gradcam': None,
-            'lime': None,
-            'shap': None
-        }
+        xai_results = {}
         
         # GradCAM
         if target_layer is not None:
@@ -727,6 +793,7 @@ class Visualizer:
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"GradCAM failed for {image_path}: {e}")
+                xai_results['gradcam'] = None
         
         # LIME
         try:
@@ -734,6 +801,7 @@ class Visualizer:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"LIME failed for {image_path}: {e}")
+            xai_results['lime'] = None
         
         # SHAP
         try:
@@ -741,74 +809,129 @@ class Visualizer:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"SHAP failed for {image_path}: {e}")
+            xai_results['shap'] = None
         
-        # If all XAI methods failed, don't create comparison plot
-        if all(v is None for v in xai_results.values()):
-            self.log(f"    ✗ All XAI methods failed for {image_basename}")
+        successful_methods = sum(1 for v in xai_results.values() if v is not None)
+        
+        # If all methods failed, skip plot
+        if successful_methods == 0:
+            self.log(f"  ✗ All XAI methods failed for {sample_id}")
             return None
         
         # Create 2x2 comparison plot
         fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+        fig.suptitle(f"XAI Comparison: {os.path.basename(image_path)} ({self.model_name})", fontsize=16, weight='bold')
         
-        # Original (top-left)
+        # [0,0] Original (top-left)
         axes[0, 0].imshow(original_img)
         axes[0, 0].set_title("Original", fontsize=14, color='black')
         axes[0, 0].axis('off')
         
-        # GradCAM (top-right)
+        # [0,1] GradCAM (top-right)
         if xai_results['gradcam'] is not None:
             axes[0, 1].imshow(xai_results['gradcam'])
             axes[0, 1].set_title("GradCAM", fontsize=14, color='green')
         else:
-            axes[0, 1].text(0.5, 0.5, 'GradCAM\n(Failed)', ha='center', va='center',
-                           fontsize=14, color='red', transform=axes[0, 1].transAxes)
+            axes[0, 1].text(0.5, 0.5, "GradCAM\n(Failed)", ha='center', va='center', 
+                           fontsize=16, color='red', weight='bold',
+                           transform=axes[0, 1].transAxes)
+            axes[0, 1].set_facecolor('#ffcccc')
             axes[0, 1].set_title("GradCAM", fontsize=14, color='red')
         axes[0, 1].axis('off')
         
-        # LIME (bottom-left)
+        # [1,0] LIME (bottom-left)
         if xai_results['lime'] is not None:
             axes[1, 0].imshow(xai_results['lime'])
             axes[1, 0].set_title("LIME", fontsize=14, color='green')
         else:
-            axes[1, 0].text(0.5, 0.5, 'LIME\n(Failed)', ha='center', va='center',
-                           fontsize=14, color='red', transform=axes[1, 0].transAxes)
+            axes[1, 0].text(0.5, 0.5, "LIME\n(Failed)", ha='center', va='center',
+                           fontsize=16, color='red', weight='bold',
+                           transform=axes[1, 0].transAxes)
+            axes[1, 0].set_facecolor('#ffcccc')
             axes[1, 0].set_title("LIME", fontsize=14, color='red')
         axes[1, 0].axis('off')
         
-        # SHAP (bottom-right)
+        # [1,1] SHAP (bottom-right)
         if xai_results['shap'] is not None:
             axes[1, 1].imshow(xai_results['shap'])
             axes[1, 1].set_title("SHAP", fontsize=14, color='green')
         else:
-            axes[1, 1].text(0.5, 0.5, 'SHAP\n(Failed)', ha='center', va='center',
-                           fontsize=14, color='red', transform=axes[1, 1].transAxes)
+            axes[1, 1].text(0.5, 0.5, "SHAP\n(Failed)", ha='center', va='center',
+                           fontsize=16, color='red', weight='bold',
+                           transform=axes[1, 1].transAxes)
+            axes[1, 1].set_facecolor('#ffcccc')
             axes[1, 1].set_title("SHAP", fontsize=14, color='red')
         axes[1, 1].axis('off')
         
-        fig.suptitle(f"XAI Comparison: {image_basename} ({self.model_name})", fontsize=16)
-        
+        # 6. Save
+        image_basename = os.path.splitext(os.path.basename(image_path))[0]
         output_filename = os.path.join(self.save_dir, f"xai_comparison_{sample_id}_{image_basename}.png")
-        plt.savefig(output_filename, bbox_inches='tight', dpi=200)
+        plt.savefig(output_filename, bbox_inches='tight', dpi=150)
         plt.close(fig)
         
-        success_count = sum(1 for v in xai_results.values() if v is not None)
-        self.log(f"    ✓ XAI comparison saved ({success_count}/3 methods successful)")
-        
-        return output_filename
+        return output_filename, successful_methods
 
-    # ========== MASTER GENERATOR WITH CENTRALIZED ERROR HANDLING ==========
-    
+    # =========================================================================
+    # 4. MASTER GENERATOR
+    # =========================================================================
     def generate_all_plots(self, y_true, y_prob, history=None, model=None, test_loader=None, xai_samples=5):
         self.log(f"Generating visualizations for {self.experiment_name}...")
         
+        # Check for NaN in y_prob at the start
+        if np.isnan(y_prob).any():
+            self.log(f"⚠️  WARNING: NaN detected in probability outputs! Model may have collapsed.")
+            self.log(f"   This usually happens when the model predicts only one class.")
+            self.log(f"   Replacing NaN with uniform distribution (1/n_classes) for visualization.")
+        
         y_pred = np.argmax(y_prob, axis=1)
         
-        # Track successes/failures
+        # Results tracking
         results = {
             'xai_success': 0,
             'xai_total': 0,
             'plots': {}
         }
+
+        # XAI Analysis
+        if model and test_loader and xai_samples > 0:
+            self.log(f"Generating XAI comparisons for {xai_samples} samples...")
+            
+            dataset = test_loader.dataset
+            full_ds = dataset.dataset if hasattr(dataset, 'dataset') else dataset
+            
+            if hasattr(full_ds, 'samples'):
+                indices = np.random.choice(len(dataset), min(xai_samples, len(dataset)), replace=False)
+                
+                for i, idx in enumerate(indices):
+                    img_path = full_ds.samples[idx][0]
+                    image_name = os.path.splitext(os.path.basename(img_path))[0]
+                    
+                    self.log(f"  Generating XAI comparison for {image_name}...")
+                    results['xai_total'] += 1
+                    
+                    try:
+                        result = self.generate_xai_comparison_plot(model, img_path, sample_id=f"sample_{i}")
+                        if result is not None:
+                            output_file, success_count = result
+                            results['xai_success'] += 1
+                            self.log(f"    ✓ XAI comparison saved ({success_count}/3 methods successful)")
+                        else:
+                            self.log(f"    ✗ XAI comparison failed (all methods failed)")
+                    except Exception as e:
+                        self.log(f"    ✗ XAI comparison failed: {e}")
+                        if self.logger:
+                            self.logger.error(f"XAI error for {img_path}: {e}", exc_info=True)
+        
+        # Clean up model from memory
+        try:
+            import gc
+            del model, test_loader
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception as e:
+            self.log(f"Cleanup failed : {e}")
+            if self.logger:
+                self.logger.error(f"Cleanup of model and test loader failed : {e}", exc_info=True)
         
         plot_functions = [
             ('training_history', lambda: self.plot_training_history(history) if history else None),
@@ -830,48 +953,9 @@ class Visualizer:
                 results['plots'][plot_name] = False
                 self.log(f"✗ {plot_name.replace('_', ' ').title()} failed: {e}")
                 if self.logger:
-                    self.logger.error(f"{plot_name} error: {e}")
+                    self.logger.error(f"{plot_name} error: {e}", exc_info=True)
                 plt.close('all')
         
-        # XAI Analysis
-        if model and test_loader and xai_samples > 0:
-            self.log(f"Generating XAI comparisons for {xai_samples} samples...")
-            
-            try:
-                dataset = test_loader.dataset
-                indices = np.random.choice(len(dataset), min(xai_samples, len(dataset)), replace=False)
-                full_ds = dataset.dataset if hasattr(dataset, 'dataset') else dataset
-                
-                for i, idx in enumerate(indices):
-                    results['xai_total'] += 1
-                    if hasattr(full_ds, 'samples'):
-                        img_path = full_ds.samples[idx][0]
-                        try:
-                            result = self.generate_xai_comparison_plot(model, img_path, sample_id=f"sample_{i}")
-                            if result is not None:
-                                results['xai_success'] += 1
-                        except Exception as e:
-                            self.log(f"  ✗ XAI comparison failed for sample {i}: {e}")
-                            if self.logger:
-                                self.logger.error(f"XAI comparison error for sample {i}: {e}")
-                    else:
-                        self.log("Dataset does not support path retrieval for XAI")
-                        break
-                        
-            except Exception as e:
-                self.log(f"XAI batch processing failed: {e}")
-                if self.logger:
-                    self.logger.error(f"XAI batch error: {e}")
-        
-        # Clean up model from memory
-        if model and test_loader:
-            try:
-                import gc
-                del model, test_loader
-                torch.cuda.empty_cache()
-                gc.collect()
-            except Exception:
-                pass
         
         # Summary
         successful_plots = sum(results['plots'].values())
@@ -895,7 +979,7 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
     
     # Inference loop with proper memory management
     with torch.inference_mode():
-        for images, labels in tqdm(loader, desc="Testing"):
+        for images, labels in loader :
             images = images.to(DEVICE, non_blocking=True)
             labels = labels.to(DEVICE, non_blocking=True)
             
