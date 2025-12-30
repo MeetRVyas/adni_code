@@ -1,8 +1,8 @@
-from models import get_model, get_img_size
-from utils import *
-from config import *
-from visualization import Visualizer
-from test import test_model
+from .models import get_model, get_img_size
+from .utils import *
+from .config import *
+from .visualization import Visualizer
+from .test import test_model
 
 from torchvision import datasets
 import torch
@@ -15,15 +15,9 @@ from torch.utils.data import DataLoader, Subset
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 import gc
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="Detected call of `lr_scheduler.step()`"
-)
 
 class Cross_Validator:
     """
@@ -44,7 +38,7 @@ class Cross_Validator:
         self.master_file = os.path.join(RESULTS_DIR, "master_results.csv")
         self.models_dir = os.path.join(RESULTS_DIR, "best_models")
 
-        os.makedirs(self.models_dir, exist_ok=True)
+        os.makedirs(self.models_dir, exist_ok = True)
         self.logger.debug(f"Models for cross-validation: {self.model_names}")
         self.logger.debug(f"GPU Augmentation: {self.use_aug}")
         self.logger.debug(f"Master results file: {self.master_file}")
@@ -91,6 +85,17 @@ class Cross_Validator:
             targets = np.array(full_dataset.targets)
             classes = full_dataset.classes
             self.logger.debug(f"Classes found: {classes}")
+
+            class_counts = np.bincount(targets)
+            total_samples = len(targets)
+            class_weights = total_samples / (len(classes) * class_counts)
+            class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
+            
+            self.logger.info("="*80)
+            self.logger.info("CLASS DISTRIBUTION & WEIGHTS:")
+            for i, cls in enumerate(classes):
+                self.logger.info(f"  {cls:<20}: {class_counts[i]:>4} samples ({100*class_counts[i]/total_samples:>5.1f}%) | Weight: {class_weights[i]:.3f}")
+            self.logger.info("="*80)
 
             # Stratified train-test split
             train_val_indices, test_indices = train_test_split(
@@ -140,7 +145,7 @@ class Cross_Validator:
 
                 self.logger.info("Initializing Model, Optimizer, Scaler and Scheduler")
 
-                # Model initialization
+                # Model Setup
                 try:
                     model = get_model(model_name, num_classes=len(classes), pretrained=PRETRAINED)
                     model = model.to(DEVICE)
@@ -148,28 +153,73 @@ class Cross_Validator:
                     self.logger.error(f"Failed to load {model_name}: {e}")
                     break
 
-                # Optimizer and scheduler setup
-                optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
-                criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+                # Use different learning rates for backbone vs classifier
+                # Backbone (pretrained features): very low LR to preserve learned features
+                # Classifier (new head): higher LR to adapt to new task
+                
+                # Get model parameters - this is architecture-agnostic
+                if hasattr(model, 'get_classifier'):
+                    # TIMM models
+                    classifier_params = model.get_classifier().parameters()
+                    backbone_params = [p for n, p in model.named_parameters() if 'classifier' not in n and 'fc' not in n and 'head' not in n]
+                elif hasattr(model, 'fc'):
+                    # ResNet, EfficientNet
+                    classifier_params = model.fc.parameters()
+                    backbone_params = [p for n, p in model.named_parameters() if 'fc' not in n]
+                elif hasattr(model, 'classifier'):
+                    # MobileNet, VGG
+                    classifier_params = model.classifier.parameters()
+                    backbone_params = [p for n, p in model.named_parameters() if 'classifier' not in n]
+                elif hasattr(model, 'head'):
+                    # ViT, Swin
+                    classifier_params = model.head.parameters()
+                    backbone_params = [p for n, p in model.named_parameters() if 'head' not in n]
+                else:
+                    # Fallback: treat all parameters equally
+                    self.logger.warning(f"Could not separate backbone/classifier for {model_name}. Using uniform LR.")
+                    classifier_params = model.parameters()
+                    backbone_params = []
+                
+                # Optimizer with discriminative learning rates
+                if backbone_params:
+                    optimizer = optim.AdamW([
+                        {'params': classifier_params, 'lr': 5e-4},  # Classifier: moderate LR
+                        {'params': backbone_params, 'lr': 1e-5}     # Backbone: very low LR (20x lower)
+                    ], weight_decay=0.01)
+                    max_lr_scheduler = 5e-4  # For OneCycleLR
+                else:
+                    optimizer = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.01)
+                    max_lr_scheduler = 5e-4
+                
+                criterion = nn.CrossEntropyLoss(
+                    weight=class_weights_tensor,
+                    label_smoothing=0.0  # Disabled for class imbalance (was 0.1)
+                )
+                
                 scaler = torch.amp.GradScaler(enabled=USE_AMP)
                 
                 # OneCycleLR requires per-batch stepping
                 scheduler = optim.lr_scheduler.OneCycleLR(
                     optimizer, 
-                    max_lr=1e-3, 
+                    max_lr=max_lr_scheduler, 
                     epochs=EPOCHS, 
                     steps_per_epoch=len(train_loader), 
-                    pct_start=0.3,
-                    div_factor=25.0,
-                    final_div_factor=100.0
+                    pct_start=0.2,           # 20% warmup (was 30%)
+                    div_factor=10.0,         # Initial LR = max_lr / 10 (was 25)
+                    final_div_factor=100.0   # Final LR = Initial LR / 100
                 )
-
-                self.logger.debug(f"Using scaler -> {scaler}")
-                self.logger.debug(f"Using scheduler -> {scheduler}")
+                
+                self.logger.debug(f"Using optimizer: AdamW with discriminative LR (classifier: 5e-4, backbone: 1e-5)")
+                self.logger.debug(f"Using criterion: CrossEntropyLoss with class weights")
+                self.logger.debug(f"Using scaler: {scaler}")
+                self.logger.debug(f"Using scheduler: {scheduler}")
 
                 best_acc = 0.0
                 training_history = []
                 best_stats = {}
+                patience = 5
+                patience_counter = 0
+                min_delta = 0.5  # Minimum improvement of 0.5% to reset patience
                 step = EPOCHS / 20
                 curr = step
 
@@ -177,12 +227,11 @@ class Cross_Validator:
                 print("\t\tProcessing [", end = "")
                 
                 for epoch in range(EPOCHS):
-                    # Training phase
+                    # Train
                     t_loss, t_acc = train_one_epoch(
                         model, train_loader, criterion, optimizer, scaler, gpu_augmenter, scheduler
                     )
-                    
-                    # Validation phase
+                    # Validate
                     v_loss, v_acc, v_prec, v_rec, v_f1 = validate_one_epoch(
                         model, val_loader, criterion
                     )
@@ -198,9 +247,9 @@ class Cross_Validator:
                         'val_f1': v_f1
                     })
 
-                    # Save best model
-                    if v_acc > best_acc:
-                        self.logger.debug(f"[{v_acc:.2f}] New best validation accuracy for model {model_name}")
+                    # Check for improvement
+                    if v_acc > best_acc + min_delta:
+                        self.logger.debug(f"[Epoch {epoch+1}] New best validation accuracy: {v_acc:.2f}% (improved by {v_acc - best_acc:.2f}%)")
                         best_acc = v_acc
                         best_stats = {
                             'val_acc': v_acc, 'val_loss': v_loss,
@@ -208,6 +257,13 @@ class Cross_Validator:
                             'train_acc': t_acc, 'train_loss': t_loss
                         }
                         torch.save(model.state_dict(), checkpoint_path)
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= patience:
+                            self.logger.info(f"[Epoch {epoch+1}] Early stopping triggered (no improvement for {patience} epochs)")
+                            print("#" * (20 - curr // step + 1), end = "")
+                            break
                     
                     # Periodic GPU cache clearing
                     if (epoch + 1) % EMPTY_CACHE_FREQUENCY == 0:
@@ -230,7 +286,7 @@ class Cross_Validator:
                     **best_stats
                 })
 
-                # Critical: cleanup GPU memory between folds
+                # Cleanup
                 del model, optimizer, scheduler, scaler, train_loader, val_loader
                 if gpu_augmenter is not None:
                     del gpu_augmenter

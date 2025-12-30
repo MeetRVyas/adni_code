@@ -11,10 +11,12 @@ from sklearn.metrics import (
 import os
 import torch
 import numpy as np
-from config import DEVICE, REPORTS_DIR, NUM_SAMPLES_TO_ANALYSE
-from visualization import Visualizer
-from utils import Logger
-
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from .config import DEVICE, REPORTS_DIR, NUM_SAMPLES_TO_ANALYSE
+from .visualization import Visualizer
+from .utils import Logger
 
 def test_model(model_name, model, loader, classes, experiment_name, history, logger: Logger, visualizer: Visualizer = None):
     """
@@ -69,7 +71,26 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
     y_pred = np.array(all_preds)
     y_prob = np.array(all_probs)
     
-    # Calculate comprehensive metrics
+    # ============================================================
+    # FIX: Check for NaN in probabilities and handle gracefully
+    # ============================================================
+    if np.isnan(y_prob).any():
+        logger.warning("⚠️  NaN detected in probability outputs!")
+        logger.warning("   This usually indicates model collapse to single-class prediction.")
+        logger.warning("   Replacing NaN with uniform distribution for metric calculation.")
+        n_classes = len(classes)
+        y_prob = np.nan_to_num(y_prob, nan=1.0/n_classes)
+    
+    # Verify probabilities sum to 1.0 (within tolerance)
+    prob_sums = y_prob.sum(axis=1)
+    if not np.allclose(prob_sums, 1.0, atol=1e-3):
+        logger.warning("⚠️  Probability distributions don't sum to 1.0!")
+        logger.warning(f"   Sum range: [{prob_sums.min():.4f}, {prob_sums.max():.4f}]")
+        # Normalize to ensure sum=1
+        y_prob = y_prob / prob_sums[:, np.newaxis]
+        logger.warning("   Probabilities normalized to sum=1.0")
+    
+    # Calculate Metrics
     accuracy = accuracy_score(y_true, y_pred) * 100
     
     try:
@@ -77,10 +98,13 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
             roc_auc = roc_auc_score(y_true, y_prob[:, 1])
         else:
             roc_auc = roc_auc_score(y_true, y_prob, multi_class='ovr', average='macro')
-    except Exception as e:
+    except ValueError as e:
         logger.warning(f"ROC AUC calculation failed: {e}")
         roc_auc = 0.0
-    
+    except Exception as e:
+        logger.warning(f"Unexpected error in ROC AUC calculation: {e}")
+        roc_auc = 0.0
+        
     kappa = cohen_kappa_score(y_true, y_pred)
     corrcoef = matthews_corrcoef(y_true, y_pred)
     jaccard = jaccard_score(y_true, y_pred, average="weighted")
@@ -103,6 +127,7 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
         f.write("\n--- Per-Class Specificity & Confusion Matrix Stats ---\n")
         cm = confusion_matrix(y_true, y_pred)
         
+        # Calculate Specificity per class
         for i, class_name in enumerate(classes):
             tp = cm[i, i]
             fp = cm[:, i].sum() - tp
