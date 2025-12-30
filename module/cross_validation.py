@@ -100,15 +100,6 @@ class Cross_Validator:
                 random_state=42
             )
             
-            test_subset = Subset(full_dataset, test_indices)
-            test_loader = DataLoader(
-                test_subset, 
-                batch_size=BATCH_SIZE, 
-                shuffle=False, 
-                num_workers=NUM_WORKERS, 
-                pin_memory=PIN_MEMORY,
-                persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
-            )
             self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
 
             train_val_targets = targets[train_val_indices]
@@ -118,6 +109,8 @@ class Cross_Validator:
             
             for fold, (fold_train_idx_rel, fold_val_idx_rel) in enumerate(skf.split(train_val_indices, train_val_targets)):
                 self.logger.info(f"  [Fold {fold+1}/{NFOLDS}]")
+
+                self.logger.info(f"Making Datasets{', Data Loaders and GPU Augmenter' if self.use_aug else ' and Data Loaders'}")
                 
                 train_idx = train_val_indices[fold_train_idx_rel]
                 val_idx = train_val_indices[fold_val_idx_rel]
@@ -144,6 +137,8 @@ class Cross_Validator:
                     pin_memory=PIN_MEMORY,
                     persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
                 )
+
+                self.logger.info("Initializing Model, Optimizer, Scaler and Scheduler")
 
                 # Model initialization
                 try:
@@ -175,6 +170,11 @@ class Cross_Validator:
                 best_acc = 0.0
                 training_history = []
                 best_stats = {}
+                step = EPOCHS / 20
+                curr = step
+
+                self.logger.info("Starting training and validation epochs")
+                print("\t\tProcessing [", end = "")
                 
                 for epoch in range(EPOCHS):
                     # Training phase
@@ -212,6 +212,11 @@ class Cross_Validator:
                     # Periodic GPU cache clearing
                     if (epoch + 1) % EMPTY_CACHE_FREQUENCY == 0:
                         torch.cuda.empty_cache()
+                    
+                    if epoch >= curr :
+                        print("#", end = "")
+                        curr += step
+                print("]")
                 
                 self.logger.info(
                     f"-> Best Val Acc: {best_acc:.2f}% | "
@@ -232,7 +237,17 @@ class Cross_Validator:
                 torch.cuda.empty_cache()
                 gc.collect()
                 self.logger.info(f"Fold {fold + 1} cleanup completed")
-
+            
+            test_subset = Subset(full_dataset, test_indices)
+            test_loader = DataLoader(
+                test_subset, 
+                batch_size=BATCH_SIZE, 
+                shuffle=False, 
+                num_workers=NUM_WORKERS, 
+                pin_memory=PIN_MEMORY,
+                persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
+            )
+            
             # Post-training evaluation on test set
             visualizer = Visualizer(
                 experiment_name=experiment_name, 
