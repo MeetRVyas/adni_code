@@ -262,7 +262,7 @@ class Cross_Validator:
                         patience_counter += 1
                         if patience_counter >= patience:
                             self.logger.info(f"[Epoch {epoch+1}] Early stopping triggered (no improvement for {patience} epochs)")
-                            print("#" * (20 - curr // step + 1), end = "")
+                            print("#" * int(20 - curr // step + 1), end = "")
                             break
                     
                     # Periodic GPU cache clearing

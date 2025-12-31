@@ -46,8 +46,11 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
     all_preds = []
     all_labels = []
     all_probs = []
+    step = len(loader) / 20
+    curr = step
     
     logger.info(f"--- Starting Evaluation: {experiment_name} ---")
+    print("\t\tProcessing [", end = "")
     
     # Inference loop with proper memory management
     with torch.inference_mode():
@@ -65,15 +68,17 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
+            if len(all_labels) >= curr :
+                print("#", end = "")
+                curr += step
+        print("]")
     
     # Convert to numpy arrays
     y_true = np.array(all_labels)
     y_pred = np.array(all_preds)
     y_prob = np.array(all_probs)
     
-    # ============================================================
-    # FIX: Check for NaN in probabilities and handle gracefully
-    # ============================================================
+    # Check for NaN in probabilities and handle gracefully
     if np.isnan(y_prob).any():
         logger.warning("⚠️  NaN detected in probability outputs!")
         logger.warning("   This usually indicates model collapse to single-class prediction.")
