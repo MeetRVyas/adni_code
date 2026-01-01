@@ -1,16 +1,14 @@
 import torch
-from torch.utils.data import Dataset
 from torchvision import transforms
+import torch.optim as optim
+import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from tqdm import tqdm
 from PIL import Image
 import os
 import logging
 import shutil
-from config import DEVICE, LOG_DIR
+from .config import *
+from .augmentation import CutMix, Mixup, get_gpu_augmentations
 
 
 class FullDataset(torch.utils.data.Dataset):
@@ -78,57 +76,74 @@ class Logger:
         self.logger.debug(message)
 
 
-def get_gpu_augmentations(img_size):
-    """GPU-based augmentations applied to tensor batches"""
-    return torch.nn.Sequential(
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(degrees=15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-    ).to(DEVICE)
-
-
-def train_one_epoch(model, loader, criterion, optimizer, scaler, gpu_augmenter=None, scheduler=None):
-    """
-    Optimized training loop with proper memory management
-    
-    Key improvements:
-    - Detach predictions before CPU transfer to prevent gradient accumulation
-    - Use context manager for gradient computation
-    - Proper scheduler stepping for OneCycleLR
-    """
+def train_one_epoch(model, loader, criterion, optimizer, scaler, strategy, scheduler=None):
+    """Optimized training loop with proper memory management"""
     model.train()
     running_loss = 0.0
     all_preds = []
     all_labels = []
     
-    for images, labels in loader :
+    mixup = Mixup(alpha=0.2) if strategy.use_mixup else None
+    cutmix = CutMix(alpha=1.0) if strategy.use_cutmix else None
+    simple_augments = get_gpu_augmentations(strategy.img_size) if strategy.use_simple_augments else None
+    grad_accum_steps = strategy.gradient_accumulation_steps
+    
+    for batch_idx, (images, labels) in enumerate(loader):
         images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
         
-        if gpu_augmenter:
-            images = gpu_augmenter(images)
+        # Apply augmentation
+        if mixup and np.random.rand() < 0.5:
+            images, labels_a, labels_b, lam = mixup(images, labels)
+            use_mixed = True
+        elif cutmix and np.random.rand() < 0.5:
+            images, labels_a, labels_b, lam = cutmix(images, labels)
+            use_mixed = True
+        elif simple_augments and np.random.rand() < 0.5:
+            images = simple_augments(images)
+            use_mixed = False
+        else:
+            use_mixed = False
         
-        optimizer.zero_grad(set_to_none=True)
+        # optimizer.zero_grad(set_to_none=True)
         
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):
             outputs = model(images)
-            loss = criterion(outputs, labels)
+            
+            if use_mixed:
+                loss = (mixup or cutmix).loss_function(criterion, outputs, labels_a, labels_b, lam)
+            else:
+                loss = criterion(outputs, labels)
+            
+            loss = loss / grad_accum_steps
         
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        if scheduler:
-            scheduler.step()
-
-        running_loss += loss.item() * images.size(0)
         
-        # Critical fix: detach before converting to prevent memory leak
-        _, predicted = outputs.detach().max(1)
-        all_preds.extend(predicted.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+        # Gradient accumulation
+        if (batch_idx + 1) % grad_accum_steps == 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            
+            if scheduler and isinstance(scheduler, (
+                optim.lr_scheduler.OneCycleLR,
+                optim.lr_scheduler.SequentialLR
+            )):
+                scheduler.step()
+        
+        running_loss += loss.item() * grad_accum_steps * images.size(0)
+        
+        # Collect stats (use original labels for mixup/cutmix)
+        if not use_mixed:
+            _, predicted = outputs.detach().max(1)
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
     total_loss = running_loss / len(loader.dataset)
-    acc = accuracy_score(all_labels, all_preds) * 100.0
+    
+    if all_preds:  # Only calculate accuracy if we have non-mixed batches
+        acc = accuracy_score(all_labels, all_preds) * 100.0
+    else:
+        acc = 0.0  # All batches were mixed
     
     return total_loss, acc
 

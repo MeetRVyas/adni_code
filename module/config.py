@@ -20,6 +20,9 @@ NUM_WORKERS = 4  # Reduced from 8 to prevent CPU bottleneck
 PRETRAINED = True
 NUM_SAMPLES_TO_ANALYSE = 5
 TEST_SPLIT = 0.2
+PATIENCE = 10
+MIN_DELTA = 0.3
+LR = 1e-4
 
 # Optimization settings
 USE_AMP = True  # Automatic Mixed Precision

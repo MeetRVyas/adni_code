@@ -14,9 +14,9 @@ from sklearn.metrics import (
     confusion_matrix, classification_report, roc_auc_score
 )
 
-from config import DEVICE, PLOTS_DIR
-from utils import get_base_transformations
-from models import get_img_size
+from .config import DEVICE, PLOTS_DIR
+from .utils import get_base_transformations
+from .models import get_img_size
 
 
 def reshape_transform_swin(tensor, height=7, width=7):

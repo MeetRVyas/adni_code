@@ -10,75 +10,64 @@ from sklearn.metrics import (
 
 import os
 import torch
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+from torchvision import transforms
 from .config import DEVICE, REPORTS_DIR, NUM_SAMPLES_TO_ANALYSE
 from .visualization import Visualizer
 from .utils import Logger
+from .augmentation import TTAWrapper
 
-def test_model(model_name, model, loader, classes, experiment_name, history, logger: Logger, visualizer: Visualizer = None):
+
+def test_model(model_name, model, loader, classes, experiment_name, history, logger: Logger, 
+               visualizer: Visualizer = None, use_tta=True):
     """
-    Comprehensive model evaluation on test set
-    
-    Generates:
-    - Detailed performance metrics (accuracy, AUC, kappa, MCC, Jaccard)
-    - Per-class analysis (precision, recall, F1, specificity)
-    - Confusion matrix
-    - Visualization plots (ROC curves, PR curves, etc.)
-    - XAI analysis on sample images
+    Performs comprehensive evaluation with optional Test-Time Augmentation.
     
     Args:
-        model_name: Architecture name
-        model: Trained model instance
-        loader: Test data loader
-        classes: List of class names
-        experiment_name: Unique identifier for this experiment
-        history: Training history (list of dicts with epoch metrics)
-        logger: Logger instance
-        visualizer: Visualizer instance for plotting
-    
-    Returns:
-        dict: Comprehensive metrics including y_true and y_prob for further analysis
+        use_tta: If True, use TTA for +2-5% accuracy boost (default: True)
     """
     model.eval()
     all_preds = []
     all_labels = []
     all_probs = []
-    step = len(loader) / 20
-    curr = step
     
     logger.info(f"--- Starting Evaluation: {experiment_name} ---")
-    print("\t\tProcessing [", end = "")
+    if use_tta:
+        logger.info("Using Test-Time Augmentation (TTA) for improved accuracy")
+        tta_model = TTAWrapper(model, num_augmentations=5)
     
-    # Inference loop with proper memory management
-    with torch.inference_mode():
-        for images, labels in loader :
-            images = images.to(DEVICE, non_blocking=True)
-            labels = labels.to(DEVICE, non_blocking=True)
+    # Inference Loop
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
             
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):
+            if use_tta:
+                # Use TTA
+                probs = tta_model(images)
+                preds = torch.argmax(probs, dim=1)
+            else:
+                # Standard inference
                 outputs = model(images)
+                probs = torch.softmax(outputs, dim=1)
+                preds = torch.argmax(outputs, dim=1)
             
-            probs = torch.softmax(outputs, dim=1)
-            preds = torch.argmax(outputs, dim=1)
-            
-            # Transfer to CPU after detaching
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
-            if len(all_labels) >= curr :
-                print("#", end = "")
-                curr += step
-        print("]")
-    
-    # Convert to numpy arrays
+            
+    # Convert to numpy
     y_true = np.array(all_labels)
     y_pred = np.array(all_preds)
     y_prob = np.array(all_probs)
     
-    # Check for NaN in probabilities and handle gracefully
+    # ============================================================================
+    # NaN Detection and Handling
+    # ============================================================================
     if np.isnan(y_prob).any():
         logger.warning("⚠️  NaN detected in probability outputs!")
         logger.warning("   This usually indicates model collapse to single-class prediction.")
@@ -95,9 +84,12 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
         y_prob = y_prob / prob_sums[:, np.newaxis]
         logger.warning("   Probabilities normalized to sum=1.0")
     
+    # ============================================================================
     # Calculate Metrics
+    # ============================================================================
     accuracy = accuracy_score(y_true, y_pred) * 100
     
+    # ROC AUC with improved error handling
     try:
         if len(classes) == 2:
             roc_auc = roc_auc_score(y_true, y_prob[:, 1])
@@ -114,17 +106,20 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
     corrcoef = matthews_corrcoef(y_true, y_pred)
     jaccard = jaccard_score(y_true, y_pred, average="weighted")
     
-    # Generate comprehensive text report
+    # ============================================================================
+    # Generate Report
+    # ============================================================================
     report_path = os.path.join(REPORTS_DIR, f"{experiment_name}.txt")
     
     with open(report_path, "w") as f:
         f.write(f"===== COMPREHENSIVE ANALYSIS REPORT: {experiment_name} =====\n\n")
+        f.write(f"Test-Time Augmentation (TTA): {'Enabled' if use_tta else 'Disabled'}\n\n")
         f.write("--- Overall Performance ---\n")
         f.write(f"Overall Accuracy: {accuracy:.2f}%\n")
-        f.write(f"Macro ROC AUC: {roc_auc:.4f}\n")
-        f.write(f"Cohen's Kappa: {kappa:.4f}\n")
-        f.write(f"Matthews Correlation Coefficient (MCC): {corrcoef:.4f}\n")
-        f.write(f"Jaccard Score: {jaccard:.4f}\n\n")
+        f.write(f"Macro ROC AUC:    {roc_auc:.4f}\n")
+        f.write(f"Cohen's Kappa:    {kappa:.4f}\n")
+        f.write(f"Matthews Correlation Coefficient (MCC):    {corrcoef:.4f}\n")
+        f.write(f"Jaccard Score:    {jaccard:.4f}\n\n")
         
         f.write("--- Detailed Per-Class Metrics ---\n")
         f.write(classification_report(y_true, y_pred, target_names=classes, digits=4))
@@ -140,19 +135,20 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
             tn = cm.sum() - (tp + fp + fn)
             
             specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-            f.write(f"{class_name:<20}: Specificity: {specificity:.4f}, TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}\n")
-    
+            f.write(f"{class_name:<20}: Specificity: {specificity:.4f}, "
+                   f"TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}\n")
+            
     logger.info(f"✅ Report saved to: {report_path}")
 
-    # Generate all visualization plots
-    if visualizer is None:
-        visualizer = Visualizer(
-            experiment_name=experiment_name, 
-            model_name=model_name, 
-            class_names=classes, 
-            logger=logger
-        )
-    
+    # ============================================================================
+    # Generate Visualizations
+    # ============================================================================
+    visualizer = visualizer or Visualizer(
+        experiment_name=experiment_name, 
+        model_name=model_name, 
+        class_names=classes, 
+        logger=logger
+    )
     visualizer.generate_all_plots(
         y_true=y_true, 
         y_prob=y_prob, 
@@ -169,7 +165,8 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
         'corrcoef': corrcoef,
         'jaccard': jaccard,
         'y_true': y_true,
-        'y_prob': y_prob
+        'y_prob': y_prob,
+        'y_pred': y_pred,  # Add predictions for ensemble
     }
     
     return metrics_dict

@@ -1,9 +1,3 @@
-from .models import get_model, get_img_size
-from .utils import *
-from .config import *
-from .visualization import Visualizer
-from .test import test_model
-
 from torchvision import datasets
 import torch
 import torch.nn as nn
@@ -18,6 +12,13 @@ import matplotlib.pyplot as plt
 import gc
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
+from .models import get_model, get_img_size
+from .utils import *
+from .config import *
+from .visualization import Visualizer
+from .test import test_model
+from .strategies import Training_Strategy
+
 
 class Cross_Validator:
     """
@@ -29,32 +30,85 @@ class Cross_Validator:
     - Checkpoint saving for best models
     - Comprehensive metric tracking
     """
-    
-    def __init__(self, model_names, logger: Logger, use_aug=False):
+    def __init__(self, model_names, logger: Logger, use_aug=False, strategy='simple_cosine', enable_ensemble=False):
         self.model_names = model_names
         self.results = []
         self.use_aug = use_aug
+        self.strategy_name = strategy
         self.logger = logger
+        self.enable_ensemble = enable_ensemble
         self.master_file = os.path.join(RESULTS_DIR, "master_results.csv")
         self.models_dir = os.path.join(RESULTS_DIR, "best_models")
+
+        # Ensemble tracking
+        self.ensemble_predictions = []  # List of (model_name, y_pred, y_prob)
+        self.test_labels = None  # Shared test labels
 
         os.makedirs(self.models_dir, exist_ok = True)
         self.logger.debug(f"Models for cross-validation: {self.model_names}")
         self.logger.debug(f"GPU Augmentation: {self.use_aug}")
+        self.logger.debug(f"Training Strategy: {self.strategy_name}")
+        self.logger.debug(f"Ensemble mode: {self.enable_ensemble}")
         self.logger.debug(f"Master results file: {self.master_file}")
 
     def run(self):
         """Main execution loop for cross-validation across all models"""
-        
         master_df = None
         if os.path.exists(self.master_file):
             master_df = pd.read_csv(self.master_file)
-            self.logger.debug(f"Loaded existing results from {self.master_file}")
+            self.logger.debug(f"Master df exists -> {self.master_file}")
+        
+        # Load dataset ONCE (file paths only)
+        self.logger.info("\n" + "="*80)
+        self.logger.info("LOADING DATASET (ONCE FOR ALL MODELS)")
+        self.logger.info("="*80)
+        self.logger.info(f"Loading dataset from: {DATA_DIR}")
+        
+        # Load with minimal transform (just to get file paths and labels)
+        temp_transform = transforms.Compose([transforms.ToTensor()])
+        base_dataset = FullDataset(DATA_DIR, temp_transform)
+        
+        targets = np.array(base_dataset.targets)
+        classes = base_dataset.classes
+        file_paths = [sample[0] for sample in base_dataset.samples]  # Extract file paths
+        
+        self.logger.info(f"Total samples: {len(targets)}")
+        self.logger.debug(f"Classes found: {classes}")
+        
+        # Calculate Class Weights (same for all models)
+        class_counts = np.bincount(targets)
+        total_samples = len(targets)
+        class_weights = total_samples / (len(classes) * class_counts)
+        class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
+        
+        self.logger.info("="*80)
+        self.logger.info("CLASS DISTRIBUTION & WEIGHTS:")
+        for i, cls in enumerate(classes):
+            self.logger.info(f"  {cls:<20}: {class_counts[i]:>4} samples "
+                           f"({100*class_counts[i]/total_samples:>5.1f}%) | Weight: {class_weights[i]:.3f}")
+        self.logger.info("="*80)
+        
+        # Train/Test Split ONCE (same test set for all models)
+        train_val_indices, test_indices = train_test_split(
+            np.arange(len(targets)),
+            test_size=TEST_SPLIT,
+            stratify=targets,
+            random_state=42  # ← Deterministic split
+        )
+        
+        self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
+        self.logger.info("✅ All models will use the SAME test set (enables ensembling)")
+        
+        # Store test labels for ensemble
+        self.test_labels = targets[test_indices]
+        
+        train_val_targets = targets[train_val_indices]
         
         skf = StratifiedKFold(n_splits=NFOLDS, shuffle=True, random_state=42)
         
+        # Train each model with model-specific transforms
         for model_name in self.model_names:
-            experiment_name = f"{model_name}_pre={PRETRAINED}_aug={self.use_aug}"
+            experiment_name = f"{model_name}_pre={PRETRAINED}_aug={self.use_aug}_strat={self.strategy_name}"
             checkpoint_path = os.path.join(self.models_dir, f"{experiment_name}_best_model.pth")
             
             self.logger.info("\n" + "="*80)
@@ -64,9 +118,10 @@ class Cross_Validator:
             # Skip if already completed
             if master_df is not None:
                 existing = master_df[
-                    (master_df['model_name'] == model_name) & 
-                    (master_df['pretrained'] == PRETRAINED) & 
-                    (master_df['augmentation'] == self.use_aug)
+                    (master_df['model_name'] == model_name) &
+                    (master_df['pretrained'] == PRETRAINED) &
+                    (master_df['augmentation'] == self.use_aug) &
+                    (master_df['strategy'] == self.strategy_name)
                 ]
                 if not existing.empty:
                     self.logger.info(">> Experiment already completed. Skipping.")
@@ -77,37 +132,38 @@ class Cross_Validator:
             img_size = get_img_size(model_name)
             self.logger.debug(f"Image size for {model_name}: {img_size}")
 
-            base_transform = get_base_transformations(img_size)
+            model_transform = get_base_transformations(img_size)
 
             # Load dataset
             self.logger.info(f"Loading dataset from: {DATA_DIR}")
-            full_dataset = FullDataset(DATA_DIR, base_transform)
-            targets = np.array(full_dataset.targets)
-            classes = full_dataset.classes
-            self.logger.debug(f"Classes found: {classes}")
+            full_dataset = FullDataset(DATA_DIR, model_transform)
+            # targets = np.array(full_dataset.targets)
+            # classes = full_dataset.classes
+            # self.logger.debug(f"Classes found: {classes}")
 
-            class_counts = np.bincount(targets)
-            total_samples = len(targets)
-            class_weights = total_samples / (len(classes) * class_counts)
-            class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
+            # # Calculate Class Weights
+            # class_counts = np.bincount(targets)
+            # total_samples = len(targets)
+            # class_weights = total_samples / (len(classes) * class_counts)
+            # class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
             
-            self.logger.info("="*80)
-            self.logger.info("CLASS DISTRIBUTION & WEIGHTS:")
-            for i, cls in enumerate(classes):
-                self.logger.info(f"  {cls:<20}: {class_counts[i]:>4} samples ({100*class_counts[i]/total_samples:>5.1f}%) | Weight: {class_weights[i]:.3f}")
-            self.logger.info("="*80)
+            # self.logger.info("="*80)
+            # self.logger.info("CLASS DISTRIBUTION & WEIGHTS:")
+            # for i, cls in enumerate(classes):
+            #     self.logger.info(f"  {cls:<20}: {class_counts[i]:>4} samples ({100*class_counts[i]/total_samples:>5.1f}%) | Weight: {class_weights[i]:.3f}")
+            # self.logger.info("="*80)
 
-            # Stratified train-test split
-            train_val_indices, test_indices = train_test_split(
-                np.arange(len(targets)),
-                test_size=TEST_SPLIT,
-                stratify=targets,
-                random_state=42
-            )
+            # # Stratified train-test split
+            # train_val_indices, test_indices = train_test_split(
+            #     np.arange(len(targets)),
+            #     test_size=TEST_SPLIT,
+            #     stratify=targets,
+            #     random_state=42
+            # )
             
-            self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
+            # self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
 
-            train_val_targets = targets[train_val_indices]
+            # train_val_targets = targets[train_val_indices]
 
             self.logger.info(f"\n=== Cross-validating: {model_name} ===")
             fold_metrics = []
@@ -123,9 +179,6 @@ class Cross_Validator:
                 train_ds = Subset(full_dataset, train_idx)
                 val_ds = Subset(full_dataset, val_idx)
 
-                # GPU augmentation
-                gpu_augmenter = get_gpu_augmentations(img_size) if self.use_aug else None
-                
                 train_loader = DataLoader(
                     train_ds, 
                     batch_size=BATCH_SIZE, 
@@ -153,73 +206,30 @@ class Cross_Validator:
                     self.logger.error(f"Failed to load {model_name}: {e}")
                     break
 
-                # Use different learning rates for backbone vs classifier
-                # Backbone (pretrained features): very low LR to preserve learned features
-                # Classifier (new head): higher LR to adapt to new task
-                
-                # Get model parameters - this is architecture-agnostic
-                if hasattr(model, 'get_classifier'):
-                    # TIMM models
-                    classifier_params = model.get_classifier().parameters()
-                    backbone_params = [p for n, p in model.named_parameters() if 'classifier' not in n and 'fc' not in n and 'head' not in n]
-                elif hasattr(model, 'fc'):
-                    # ResNet, EfficientNet
-                    classifier_params = model.fc.parameters()
-                    backbone_params = [p for n, p in model.named_parameters() if 'fc' not in n]
-                elif hasattr(model, 'classifier'):
-                    # MobileNet, VGG
-                    classifier_params = model.classifier.parameters()
-                    backbone_params = [p for n, p in model.named_parameters() if 'classifier' not in n]
-                elif hasattr(model, 'head'):
-                    # ViT, Swin
-                    classifier_params = model.head.parameters()
-                    backbone_params = [p for n, p in model.named_parameters() if 'head' not in n]
-                else:
-                    # Fallback: treat all parameters equally
-                    self.logger.warning(f"Could not separate backbone/classifier for {model_name}. Using uniform LR.")
-                    classifier_params = model.parameters()
-                    backbone_params = []
-                
-                # Optimizer with discriminative learning rates
-                if backbone_params:
-                    optimizer = optim.AdamW([
-                        {'params': classifier_params, 'lr': 5e-4},  # Classifier: moderate LR
-                        {'params': backbone_params, 'lr': 1e-5}     # Backbone: very low LR (20x lower)
-                    ], weight_decay=0.01)
-                    max_lr_scheduler = 5e-4  # For OneCycleLR
-                else:
-                    optimizer = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.01)
-                    max_lr_scheduler = 5e-4
-                
-                criterion = nn.CrossEntropyLoss(
-                    weight=class_weights_tensor,
-                    label_smoothing=0.0  # Disabled for class imbalance (was 0.1)
+                # Get training strategy
+                strategy = Training_Strategy.get_strategy(self.strategy_name)(
+                    model,
+                    img_size,
+                    lr=LR,
+                    epochs=EPOCHS,
+                    steps_per_epoch=len(train_loader),
+                    num_classes=len(classes),
+                    use_aug = self.use_aug,
+                    class_weights_tensor=class_weights_tensor if self.strategy_name != 'simple_cosine' else None
                 )
+                
+                strategy_desc = strategy.setup()
                 
                 scaler = torch.amp.GradScaler(enabled=USE_AMP)
-                
-                # OneCycleLR requires per-batch stepping
-                scheduler = optim.lr_scheduler.OneCycleLR(
-                    optimizer, 
-                    max_lr=max_lr_scheduler, 
-                    epochs=EPOCHS, 
-                    steps_per_epoch=len(train_loader), 
-                    pct_start=0.2,           # 20% warmup (was 30%)
-                    div_factor=10.0,         # Initial LR = max_lr / 10 (was 25)
-                    final_div_factor=100.0   # Final LR = Initial LR / 100
-                )
-                
-                self.logger.debug(f"Using optimizer: AdamW with discriminative LR (classifier: 5e-4, backbone: 1e-5)")
+
+                self.logger.info(f"Using Strategy: {strategy_desc}")
                 self.logger.debug(f"Using criterion: CrossEntropyLoss with class weights")
                 self.logger.debug(f"Using scaler: {scaler}")
-                self.logger.debug(f"Using scheduler: {scheduler}")
 
                 best_acc = 0.0
                 training_history = []
                 best_stats = {}
-                patience = 5
                 patience_counter = 0
-                min_delta = 0.5  # Minimum improvement of 0.5% to reset patience
                 step = EPOCHS / 20
                 curr = step
 
@@ -229,26 +239,35 @@ class Cross_Validator:
                 for epoch in range(EPOCHS):
                     # Train
                     t_loss, t_acc = train_one_epoch(
-                        model, train_loader, criterion, optimizer, scaler, gpu_augmenter, scheduler
-                    )
-                    # Validate
-                    v_loss, v_acc, v_prec, v_rec, v_f1 = validate_one_epoch(
-                        model, val_loader, criterion
+                        model, train_loader, strategy.criterion, strategy.optimizer, 
+                        scaler, strategy, strategy.scheduler
                     )
                     
+                    # Validate
+                    v_loss, v_acc, v_prec, v_rec, v_f1 = validate_one_epoch(
+                        model, val_loader, strategy.criterion
+                    )
+                    
+                    # Step epoch-based schedulers
+                    if strategy.scheduler and not isinstance(strategy.scheduler, (
+                        optim.lr_scheduler.OneCycleLR,
+                        optim.lr_scheduler.SequentialLR
+                    )):
+                        strategy.scheduler.step()
+                    
                     training_history.append({
-                        'epoch': epoch, 
-                        'train_acc': t_acc, 
-                        'train_loss': t_loss, 
-                        'val_acc': v_acc, 
-                        'val_loss': v_loss, 
-                        'val_prec': v_prec, 
-                        'val_rec': v_rec, 
+                        'epoch': epoch,
+                        'train_acc': t_acc,
+                        'train_loss': t_loss,
+                        'val_acc': v_acc,
+                        'val_loss': v_loss,
+                        'val_prec': v_prec,
+                        'val_rec': v_rec,
                         'val_f1': v_f1
                     })
 
                     # Check for improvement
-                    if v_acc > best_acc + min_delta:
+                    if v_acc > best_acc + MIN_DELTA:
                         self.logger.debug(f"[Epoch {epoch+1}] New best validation accuracy: {v_acc:.2f}% (improved by {v_acc - best_acc:.2f}%)")
                         best_acc = v_acc
                         best_stats = {
@@ -260,8 +279,8 @@ class Cross_Validator:
                         patience_counter = 0
                     else:
                         patience_counter += 1
-                        if patience_counter >= patience:
-                            self.logger.info(f"[Epoch {epoch+1}] Early stopping triggered (no improvement for {patience} epochs)")
+                        if patience_counter >= PATIENCE:
+                            self.logger.info(f"[Epoch {epoch+1}] Early stopping triggered (no improvement for {PATIENCE} epochs)")
                             print("#" * int(20 - curr // step + 1), end = "")
                             break
                     
@@ -276,9 +295,9 @@ class Cross_Validator:
                 
                 self.logger.info(
                     f"-> Best Val Acc: {best_acc:.2f}% | "
-                    f"F1: {best_stats['val_f1']:.4f} | "
-                    f"Precision: {best_stats['val_prec']:.4f} | "
-                    f"Recall: {best_stats['val_rec']:.4f}"
+                    f"F1: {best_stats.get('val_f1', 0):.4f} | "
+                    f"Precision: {best_stats.get('val_prec', 0):.4f} | "
+                    f"Recall: {best_stats.get('val_rec', 0):.4f}"
                 )
 
                 fold_metrics.append({
@@ -287,9 +306,7 @@ class Cross_Validator:
                 })
 
                 # Cleanup
-                del model, optimizer, scheduler, scaler, train_loader, val_loader
-                if gpu_augmenter is not None:
-                    del gpu_augmenter
+                del model, strategy, scaler, train_loader, val_loader
                 torch.cuda.empty_cache()
                 gc.collect()
                 self.logger.info(f"Fold {fold + 1} cleanup completed")
@@ -309,7 +326,7 @@ class Cross_Validator:
                 experiment_name=experiment_name, 
                 model_name=model_name, 
                 class_names=classes, 
-                transform=base_transform, 
+                transform=model_transform, 
                 logger=self.logger
             )
             
@@ -324,6 +341,16 @@ class Cross_Validator:
 
             final_accuracy = metrics["accuracy"]
             self.logger.info(f"[{final_accuracy:.2f}%] Final test accuracy")
+
+            # Save predictions for ensemble
+            if self.enable_ensemble:
+                self.ensemble_predictions.append({
+                    'model_name': model_name,
+                    'y_pred': metrics['y_pred'],  # Predicted labels
+                    'y_prob': metrics['y_prob'],  # Predicted probabilities
+                    'accuracy': final_accuracy
+                })
+                self.logger.info(f"✅ Predictions saved for ensemble ({len(self.ensemble_predictions)}/{len(self.model_names)})")
             
             # Aggregate fold results
             aggregate_fold_results = {}
@@ -343,6 +370,7 @@ class Cross_Validator:
                 'model_name': [model_name],
                 'pretrained': [PRETRAINED],
                 'augmentation': [self.use_aug],
+                'strategy': [self.strategy_name],
                 'best_val_accuracy': [f"{best_acc:.2f}%"],
                 'final_test_accuracy': [f"{final_accuracy:.2f}%"],
                 'total_epochs': [EPOCHS],
@@ -352,17 +380,65 @@ class Cross_Validator:
             }
             
             pd.DataFrame(results_data).to_csv(
-                self.master_file, 
-                mode='a', 
-                header=not os.path.exists(self.master_file), 
+                self.master_file,
+                mode='a',
+                header=not os.path.exists(self.master_file),
                 index=False
             )
             self.logger.info(f"Results appended to {self.master_file}")
             self.logger.info(f"EXPERIMENT FINISHED: {experiment_name.upper()}")
 
             # Final cleanup
-            del eval_model, test_loader
+            del full_dataset, eval_model, test_loader
             torch.cuda.empty_cache()
             gc.collect()
         
+         # ENSEMBLE: Combine predictions from all models
+        if self.enable_ensemble and len(self.ensemble_predictions) > 1:
+            self.logger.info("\n" + "="*80)
+            self.logger.info("RUNNING ENSEMBLE PREDICTION")
+            self.logger.info("="*80)
+            self._run_ensemble(classes)
+        
         self.logger.info("\n>>> Batch Complete.")
+    
+    def _run_ensemble(self, classes):
+        """Ensemble predictions from multiple models."""
+        self.logger.info(f"Ensembling {len(self.ensemble_predictions)} models:")
+        for pred in self.ensemble_predictions:
+            self.logger.info(f"  - {pred['model_name']}: {pred['accuracy']:.2f}%")
+        
+        # Average probabilities
+        all_probs = np.array([pred['y_prob'] for pred in self.ensemble_predictions])
+        ensemble_probs = all_probs.mean(axis=0)
+        ensemble_preds = np.argmax(ensemble_probs, axis=1)
+        
+        # Calculate ensemble accuracy
+        from sklearn.metrics import accuracy_score, classification_report
+        ensemble_accuracy = accuracy_score(self.test_labels, ensemble_preds) * 100
+        
+        self.logger.info("\n" + "="*80)
+        self.logger.info(f"🏆 ENSEMBLE ACCURACY: {ensemble_accuracy:.2f}%")
+        self.logger.info("="*80)
+        
+        # Detailed report
+        self.logger.info("\nEnsemble Classification Report:")
+        report = classification_report(self.test_labels, ensemble_preds, target_names=classes, digits=4)
+        self.logger.info("\n" + report)
+        
+        # Save ensemble results
+        ensemble_results = {
+            'model_name': ['ENSEMBLE'],
+            'pretrained': [PRETRAINED],
+            'augmentation': [self.use_aug],
+            'strategy': [self.strategy_name],
+            'num_models': [len(self.ensemble_predictions)],
+            'final_test_accuracy': [f"{ensemble_accuracy:.2f}%"],
+            'individual_accuracies': [', '.join([f"{p['accuracy']:.2f}%" for p in self.ensemble_predictions])],
+        }
+        
+        pd.DataFrame(ensemble_results).to_csv(
+            self.master_file, mode='a', header=False, index=False
+        )
+        
+        self.logger.info(f"✅ Ensemble results saved to {self.master_file}")
