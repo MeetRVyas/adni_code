@@ -88,7 +88,6 @@ class TTAWrapper:
             transforms.Compose([]),  # Original (no transform)
             transforms.Compose([transforms.RandomHorizontalFlip(p=1.0)]),
             transforms.Compose([transforms.RandomRotation(degrees=10)]),
-            transforms.Compose([transforms.RandomRotation(degrees=-10)]),
             transforms.Compose([
                 transforms.ColorJitter(brightness=0.1, contrast=0.1)
             ]),

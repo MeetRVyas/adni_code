@@ -5,7 +5,7 @@ class Training_Strategy:
     """Base class for training strategies."""
     
     @staticmethod
-    def get_strategy(name) -> Training_Strategy :
+    def get_strategy(name) :
         strategies = {
             'simple_cosine': SimpleCosineLRStrategy,
             'discriminative_onecycle': DiscriminativeOneCycleStrategy,

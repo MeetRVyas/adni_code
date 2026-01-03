@@ -17,7 +17,7 @@ from .utils import *
 from .config import *
 from .visualization import Visualizer
 from .test import test_model
-from .strategies import Training_Strategy
+from .progressive_finetuning import ProgressiveFineTuner
 
 
 class Cross_Validator:
@@ -67,6 +67,8 @@ class Cross_Validator:
         # Load with minimal transform (just to get file paths and labels)
         temp_transform = transforms.Compose([transforms.ToTensor()])
         base_dataset = FullDataset(DATA_DIR, temp_transform)
+
+        training_history = []
         
         targets = np.array(base_dataset.targets)
         classes = base_dataset.classes
@@ -137,36 +139,13 @@ class Cross_Validator:
             # Load dataset
             self.logger.info(f"Loading dataset from: {DATA_DIR}")
             full_dataset = FullDataset(DATA_DIR, model_transform)
-            # targets = np.array(full_dataset.targets)
-            # classes = full_dataset.classes
-            # self.logger.debug(f"Classes found: {classes}")
-
-            # # Calculate Class Weights
-            # class_counts = np.bincount(targets)
-            # total_samples = len(targets)
-            # class_weights = total_samples / (len(classes) * class_counts)
-            # class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
-            
-            # self.logger.info("="*80)
-            # self.logger.info("CLASS DISTRIBUTION & WEIGHTS:")
-            # for i, cls in enumerate(classes):
-            #     self.logger.info(f"  {cls:<20}: {class_counts[i]:>4} samples ({100*class_counts[i]/total_samples:>5.1f}%) | Weight: {class_weights[i]:.3f}")
-            # self.logger.info("="*80)
-
-            # # Stratified train-test split
-            # train_val_indices, test_indices = train_test_split(
-            #     np.arange(len(targets)),
-            #     test_size=TEST_SPLIT,
-            #     stratify=targets,
-            #     random_state=42
-            # )
-            
-            # self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
-
-            # train_val_targets = targets[train_val_indices]
 
             self.logger.info(f"\n=== Cross-validating: {model_name} ===")
             fold_metrics = []
+
+            self.logger.info("Initializing Fine tuner")
+
+            finetuner = ProgressiveFineTuner(model_name, classes, self.logger, checkpoint_path)
             
             for fold, (fold_train_idx_rel, fold_val_idx_rel) in enumerate(skf.split(train_val_indices, train_val_targets)):
                 self.logger.info(f"  [Fold {fold+1}/{NFOLDS}]")
@@ -180,121 +159,27 @@ class Cross_Validator:
                 val_ds = Subset(full_dataset, val_idx)
 
                 train_loader = DataLoader(
-                    train_ds, 
-                    batch_size=BATCH_SIZE, 
-                    shuffle=True, 
-                    num_workers=NUM_WORKERS, 
+                    train_ds,
+                    batch_size=BATCH_SIZE,
+                    shuffle=True,
+                    num_workers=NUM_WORKERS,
                     pin_memory=PIN_MEMORY,
                     persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
                 )
                 val_loader = DataLoader(
-                    val_ds, 
-                    batch_size=BATCH_SIZE, 
-                    shuffle=False, 
-                    num_workers=NUM_WORKERS, 
+                    val_ds,
+                    batch_size=BATCH_SIZE,
+                    shuffle=False,
+                    num_workers=NUM_WORKERS,
                     pin_memory=PIN_MEMORY,
                     persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
                 )
 
-                self.logger.info("Initializing Model, Optimizer, Scaler and Scheduler")
-
-                # Model Setup
-                try:
-                    model = get_model(model_name, num_classes=len(classes), pretrained=PRETRAINED)
-                    model = model.to(DEVICE)
-                except Exception as e:
-                    self.logger.error(f"Failed to load {model_name}: {e}")
-                    break
-
-                # Get training strategy
-                strategy = Training_Strategy.get_strategy(self.strategy_name)(
-                    model,
-                    img_size,
-                    lr=LR,
-                    epochs=EPOCHS,
-                    steps_per_epoch=len(train_loader),
-                    num_classes=len(classes),
-                    use_aug = self.use_aug,
-                    class_weights_tensor=class_weights_tensor if self.strategy_name != 'simple_cosine' else None
-                )
-                
-                strategy_desc = strategy.setup()
-                
-                scaler = torch.amp.GradScaler(enabled=USE_AMP)
-
-                self.logger.info(f"Using Strategy: {strategy_desc}")
-                self.logger.debug(f"Using criterion: CrossEntropyLoss with class weights")
-                self.logger.debug(f"Using scaler: {scaler}")
-
-                best_acc = 0.0
-                training_history = []
-                best_stats = {}
-                patience_counter = 0
-                step = EPOCHS / 20
-                curr = step
-
-                self.logger.info("Starting training and validation epochs")
-                print("\t\tProcessing [", end = "")
-                
-                for epoch in range(EPOCHS):
-                    # Train
-                    t_loss, t_acc = train_one_epoch(
-                        model, train_loader, strategy.criterion, strategy.optimizer, 
-                        scaler, strategy, strategy.scheduler
-                    )
-                    
-                    # Validate
-                    v_loss, v_acc, v_prec, v_rec, v_f1 = validate_one_epoch(
-                        model, val_loader, strategy.criterion
-                    )
-                    
-                    # Step epoch-based schedulers
-                    if strategy.scheduler and not isinstance(strategy.scheduler, (
-                        optim.lr_scheduler.OneCycleLR,
-                        optim.lr_scheduler.SequentialLR
-                    )):
-                        strategy.scheduler.step()
-                    
-                    training_history.append({
-                        'epoch': epoch,
-                        'train_acc': t_acc,
-                        'train_loss': t_loss,
-                        'val_acc': v_acc,
-                        'val_loss': v_loss,
-                        'val_prec': v_prec,
-                        'val_rec': v_rec,
-                        'val_f1': v_f1
-                    })
-
-                    # Check for improvement
-                    if v_acc > best_acc + MIN_DELTA:
-                        self.logger.debug(f"[Epoch {epoch+1}] New best validation accuracy: {v_acc:.2f}% (improved by {v_acc - best_acc:.2f}%)")
-                        best_acc = v_acc
-                        best_stats = {
-                            'val_acc': v_acc, 'val_loss': v_loss,
-                            'val_prec': v_prec, 'val_rec': v_rec, 'val_f1': v_f1,
-                            'train_acc': t_acc, 'train_loss': t_loss
-                        }
-                        torch.save(model.state_dict(), checkpoint_path)
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
-                        if patience_counter >= PATIENCE:
-                            self.logger.info(f"[Epoch {epoch+1}] Early stopping triggered (no improvement for {PATIENCE} epochs)")
-                            print("#" * int(20 - curr // step + 1), end = "")
-                            break
-                    
-                    # Periodic GPU cache clearing
-                    if (epoch + 1) % EMPTY_CACHE_FREQUENCY == 0:
-                        torch.cuda.empty_cache()
-                    
-                    if epoch >= curr :
-                        print("#", end = "")
-                        curr += step
-                print("]")
+                history, best_stats = finetuner.fit(train_loader, val_loader)
+                training_history.append(history)
                 
                 self.logger.info(
-                    f"-> Best Val Acc: {best_acc:.2f}% | "
+                    f"-> Best Val Acc: {best_stats.get('val_acc', 0):.2f}% | "
                     f"F1: {best_stats.get('val_f1', 0):.4f} | "
                     f"Precision: {best_stats.get('val_prec', 0):.4f} | "
                     f"Recall: {best_stats.get('val_rec', 0):.4f}"
@@ -306,7 +191,7 @@ class Cross_Validator:
                 })
 
                 # Cleanup
-                del model, strategy, scaler, train_loader, val_loader
+                del train_loader, val_loader
                 torch.cuda.empty_cache()
                 gc.collect()
                 self.logger.info(f"Fold {fold + 1} cleanup completed")
@@ -371,7 +256,7 @@ class Cross_Validator:
                 'pretrained': [PRETRAINED],
                 'augmentation': [self.use_aug],
                 'strategy': [self.strategy_name],
-                'best_val_accuracy': [f"{best_acc:.2f}%"],
+                'best_val_accuracy': [f"{best_stats.get('val_acc', 0):.2f}%"],
                 'final_test_accuracy': [f"{final_accuracy:.2f}%"],
                 'total_epochs': [EPOCHS],
                 'batch_size': [BATCH_SIZE],
@@ -389,7 +274,7 @@ class Cross_Validator:
             self.logger.info(f"EXPERIMENT FINISHED: {experiment_name.upper()}")
 
             # Final cleanup
-            del full_dataset, eval_model, test_loader
+            del full_dataset, eval_model, test_loader, finetuner
             torch.cuda.empty_cache()
             gc.collect()
         

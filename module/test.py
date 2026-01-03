@@ -23,7 +23,7 @@ from .augmentation import TTAWrapper
 
 
 def test_model(model_name, model, loader, classes, experiment_name, history, logger: Logger, 
-               visualizer: Visualizer = None, use_tta=True):
+               visualizer: Visualizer = None, use_tta=False):
     """
     Performs comprehensive evaluation with optional Test-Time Augmentation.
     
@@ -41,7 +41,7 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
         tta_model = TTAWrapper(model, num_augmentations=5)
     
     # Inference Loop
-    with torch.no_grad():
+    with torch.inference_mode():
         for images, labels in loader:
             images = images.to(DEVICE)
             labels = labels.to(DEVICE)

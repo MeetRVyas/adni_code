@@ -1,46 +1,29 @@
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision import transforms, datasets
+import torch.optim as optim
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from PIL import Image
+import logging
+import shutil
+import timm
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from tqdm import tqdm
-from PIL import Image
-import os
-import logging
-import sys
-import shutil
-import timm
-
 import seaborn as sns
 import pandas as pd
-import numpy as np
-import torch.nn.functional as F
 from itertools import cycle
 from sklearn.metrics import (
-    accuracy_score, precision_recall_fscore_support,
     roc_curve, auc, precision_recall_curve, average_precision_score,
-    confusion_matrix, classification_report,
-    accuracy_score, 
-    roc_auc_score, 
-    cohen_kappa_score, 
-    classification_report, 
-    confusion_matrix,
-    matthews_corrcoef,
-    jaccard_score
+    confusion_matrix, classification_report, roc_auc_score,
+    accuracy_score, precision_recall_fscore_support
 )
-
-import torch.nn as nn
-import torch.optim as optim
+from torch.utils.data import DataLoader, Subset
 import gc
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="Detected call of `lr_scheduler.step()`"
-)
 
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,13 +37,16 @@ LOG_DIR = os.path.join(OUTPUT_DIR, "logs")
 DATA_DIR = "/kaggle/input/augmented-alzheimer-mri-dataset/OriginalDataset"
 
 # Training hyperparameters
-EPOCHS = 5
+EPOCHS = 25
 NFOLDS = 3
 BATCH_SIZE = 32
 NUM_WORKERS = 4  # Reduced from 8 to prevent CPU bottleneck
 PRETRAINED = True
 NUM_SAMPLES_TO_ANALYSE = 5
 TEST_SPLIT = 0.2
+PATIENCE = 10
+MIN_DELTA = 0.3
+LR = 1e-4
 
 # Optimization settings
 USE_AMP = True  # Automatic Mixed Precision
@@ -127,6 +113,266 @@ def get_model(model_name, num_classes, pretrained=True):
         raise e
 
 
+def get_gpu_augmentations(img_size):
+    return torch.nn.Sequential(
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(degrees=15),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    ).to(DEVICE)
+
+
+# ADVANCED AUGMENTATION TECHNIQUES
+class Mixup:
+    def __init__(self, alpha=0.2):
+        self.alpha = alpha
+    
+    def __call__(self, x, y):
+        if self.alpha > 0:
+            lam = np.random.beta(self.alpha, self.alpha)
+        else:
+            lam = 1
+        
+        batch_size = x.size(0)
+        index = torch.randperm(batch_size).to(x.device)
+        
+        mixed_x = lam * x + (1 - lam) * x[index]
+        y_a, y_b = y, y[index]
+        return mixed_x, y_a, y_b, lam
+    
+    def loss_function(self, criterion, outputs, y_a, y_b, lam):
+        return lam * criterion(outputs, y_a) + (1 - lam) * criterion(outputs, y_b)
+
+
+class CutMix:
+    def __init__(self, alpha=1.0):
+        self.alpha = alpha
+    
+    def __call__(self, x, y):
+        lam = np.random.beta(self.alpha, self.alpha)
+        batch_size = x.size(0)
+        index = torch.randperm(batch_size).to(x.device)
+        
+        # Get random box
+        W, H = x.size(2), x.size(3)
+        cut_rat = np.sqrt(1. - lam)
+        cut_w = int(W * cut_rat)
+        cut_h = int(H * cut_rat)
+        
+        cx = np.random.randint(W)
+        cy = np.random.randint(H)
+        
+        bbx1 = np.clip(cx - cut_w // 2, 0, W)
+        bby1 = np.clip(cy - cut_h // 2, 0, H)
+        bbx2 = np.clip(cx + cut_w // 2, 0, W)
+        bby2 = np.clip(cy + cut_h // 2, 0, H)
+        
+        # Apply cutmix
+        x[:, :, bbx1:bbx2, bby1:bby2] = x[index, :, bbx1:bbx2, bby1:bby2]
+        
+        # Adjust lambda
+        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (W * H))
+        
+        y_a, y_b = y, y[index]
+        return x, y_a, y_b, lam
+    
+    def loss_function(self, criterion, outputs, y_a, y_b, lam):
+        return lam * criterion(outputs, y_a) + (1 - lam) * criterion(outputs, y_b)
+
+
+# TEST-TIME AUGMENTATION (TTA)
+class TTAWrapper:
+    
+    def __init__(self, model, num_augmentations=5):
+        self.model = model
+        self.num_augmentations = num_augmentations
+        
+        # Define TTA transformations
+        self.tta_transforms = [
+            transforms.Compose([]),  # Original (no transform)
+            transforms.Compose([transforms.RandomHorizontalFlip(p=1.0)]),
+            transforms.Compose([transforms.RandomRotation(degrees=10)]),
+            transforms.Compose([
+                transforms.ColorJitter(brightness=0.1, contrast=0.1)
+            ]),
+        ]
+    
+    def __call__(self, images):
+        self.model.eval()
+        batch_size = images.size(0)
+        all_outputs = []
+        
+        with torch.no_grad():
+            for transform in self.tta_transforms[:self.num_augmentations]:
+                # Apply transform to each image in batch
+                augmented_batch = torch.stack([
+                    transform(img) for img in images
+                ])
+                
+                # Get predictions
+                outputs = self.model(augmented_batch)
+                probs = F.softmax(outputs, dim=1)
+                all_outputs.append(probs)
+        
+        # Average all predictions
+        avg_probs = torch.stack(all_outputs).mean(dim=0)
+        return avg_probs
+
+
+class Training_Strategy:
+    
+    @staticmethod
+    def get_strategy(name) :
+        strategies = {
+            'simple_cosine': SimpleCosineLRStrategy,
+            'discriminative_onecycle': DiscriminativeOneCycleStrategy,
+            'full_finetune_cosine': FullFinetuneCosineStrategy,
+            'aggressive_warmup': AggressiveWarmupStrategy,
+            'conservative_sgd': ConservativeSGDStrategy,
+        }
+        
+        strategy_class = strategies.get(name, FullFinetuneCosineStrategy)
+        return strategy_class
+    
+    def __init__(self, model, img_size, lr, epochs, steps_per_epoch, num_classes, use_aug, class_weights_tensor=None):
+        self.model = model
+        self.img_size = img_size
+        self.lr = lr
+        self.epochs = epochs
+        self.steps_per_epoch = steps_per_epoch
+        self.num_classes = num_classes
+        self.use_aug = use_aug
+        self.class_weights_tensor = class_weights_tensor
+        
+        self.optimizer = None
+        self.scheduler = None
+        self.criterion = None
+        self.use_mixup = False
+        self.use_cutmix = False
+        self.use_simple_augments = use_aug
+        self.gradient_accumulation_steps = 1
+        
+    def setup(self):
+        raise NotImplementedError
+
+
+class SimpleCosineLRStrategy(Training_Strategy):
+    def setup(self):
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=0.01)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.epochs)
+        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights_tensor) if self.class_weights_tensor is not None else nn.CrossEntropyLoss()
+        return "AdamW + CosineAnnealing + Full Fine-tuning"
+
+
+class DiscriminativeOneCycleStrategy(Training_Strategy):
+    def setup(self):
+        # Separate backbone from classifier
+        classifier_params, backbone_params = self._separate_parameters()
+        
+        if backbone_params:
+            self.optimizer = optim.AdamW([
+                {'params': classifier_params, 'lr': self.lr},
+                {'params': backbone_params, 'lr': self.lr / 50}  # 50x lower
+            ], weight_decay=0.01)
+        else:
+            self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=0.01)
+        
+        self.scheduler = optim.lr_scheduler.OneCycleLR(
+            self.optimizer, max_lr=self.lr, epochs=self.epochs, 
+            steps_per_epoch=self.steps_per_epoch, pct_start=0.2,
+            div_factor=10.0, final_div_factor=100.0
+        )
+        
+        self.criterion = nn.CrossEntropyLoss(
+            weight=self.class_weights_tensor,
+            label_smoothing=0.0
+        )
+        
+        return "AdamW + OneCycleLR + Discriminative LR"
+    
+    def _separate_parameters(self):
+        try:
+            # Try different methods to get classifier
+            classifier = None
+            if hasattr(self.model, 'get_classifier'):
+                classifier = self.model.get_classifier()
+                # Handle tuple return (EfficientFormer, ConvNeXt)
+                if isinstance(classifier, tuple):
+                    classifier = classifier[0] if len(classifier) > 0 else None
+            elif hasattr(self.model, 'fc'):
+                classifier = self.model.fc
+            elif hasattr(self.model, 'classifier'):
+                classifier = self.model.classifier
+            elif hasattr(self.model, 'head'):
+                classifier = self.model.head
+            
+            if classifier is None or not isinstance(classifier, nn.Module):
+                return list(self.model.parameters()), []
+            
+            classifier_params = list(classifier.parameters())
+            classifier_param_ids = {id(p) for p in classifier_params}
+            backbone_params = [p for p in self.model.parameters() if id(p) not in classifier_param_ids]
+            
+            return classifier_params, backbone_params
+        except:
+            return list(self.model.parameters()), []
+
+
+class FullFinetuneCosineStrategy(Training_Strategy):
+    def setup(self):
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=0.01)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=self.epochs // 3, T_mult=1, eta_min=self.lr / 100
+        )
+        self.criterion = nn.CrossEntropyLoss(
+            weight=self.class_weights_tensor,
+            label_smoothing=0.1
+        )
+        if self.use_aug :
+            self.use_mixup = True  # Enable mixup
+            self.use_simple_augments = False
+        return "AdamW + CosineWarmRestarts + Mixup"
+
+
+class AggressiveWarmupStrategy(Training_Strategy):
+    def setup(self):
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr * 2, weight_decay=0.01)
+        
+        # Linear warmup + CosineAnnealing
+        warmup_epochs = max(1, self.epochs // 10)
+        warmup_scheduler = optim.lr_scheduler.LinearLR(
+            self.optimizer, start_factor=0.1, total_iters=warmup_epochs * self.steps_per_epoch
+        )
+        cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=(self.epochs - warmup_epochs) * self.steps_per_epoch
+        )
+        self.scheduler = optim.lr_scheduler.SequentialLR(
+            self.optimizer, 
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_epochs * self.steps_per_epoch]
+        )
+        
+        self.criterion = nn.CrossEntropyLoss(
+            weight=self.class_weights_tensor,
+            label_smoothing=0.1
+        )
+        if self.use_aug :
+            self.use_cutmix = True
+            self.use_simple_augments = False
+        self.gradient_accumulation_steps = 2  # Effective batch size 2x
+        return "AdamW + Warmup + CutMix + GradAccum"
+
+
+class ConservativeSGDStrategy(Training_Strategy):
+    def setup(self):
+        self.optimizer = optim.SGD(
+            self.model.parameters(), lr=self.lr, momentum=0.9, 
+            weight_decay=0.01, nesterov=True
+        )
+        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=self.epochs // 3, gamma=0.1)
+        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights_tensor)
+        return "SGD + StepLR + Nesterov"
+
+
 class FullDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir, transform):
         from torchvision.datasets import ImageFolder
@@ -142,7 +388,7 @@ class FullDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         path, label = self.samples[idx]
         image = Image.open(path).convert('RGB')
-        if self.transform: 
+        if self.transform:
             image = self.transform(image)
         return image, label
 
@@ -185,55 +431,80 @@ class Logger:
     def warning(self, message: str) -> None:
         self.logger.warning(message)
 
-    def error(self, message: str) -> None:
-        self.logger.error(message, exc_info=True)
+    def error(self, message: str, exc_info : bool = True) -> None:
+        self.logger.error(message, exc_info)
     
     def debug(self, message: str) -> None:
         self.logger.debug(message)
 
 
-def get_gpu_augmentations(img_size):
-    return torch.nn.Sequential(
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(degrees=15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-    ).to(DEVICE)
-
-
-def train_one_epoch(model, loader, criterion, optimizer, scaler, gpu_augmenter=None, scheduler=None):
+def train_one_epoch(model, loader, criterion, optimizer, scaler, strategy, scheduler=None):
     model.train()
     running_loss = 0.0
     all_preds = []
     all_labels = []
     
-    for images, labels in loader:
+    mixup = Mixup(alpha=0.2) if strategy.use_mixup else None
+    cutmix = CutMix(alpha=1.0) if strategy.use_cutmix else None
+    simple_augments = get_gpu_augmentations(strategy.img_size) if strategy.use_simple_augments else None
+    grad_accum_steps = strategy.gradient_accumulation_steps
+    
+    for batch_idx, (images, labels) in enumerate(loader):
         images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
         
-        if gpu_augmenter:
-            images = gpu_augmenter(images)
+        # Apply augmentation
+        if mixup and np.random.rand() < 0.5:
+            images, labels_a, labels_b, lam = mixup(images, labels)
+            use_mixed = True
+        elif cutmix and np.random.rand() < 0.5:
+            images, labels_a, labels_b, lam = cutmix(images, labels)
+            use_mixed = True
+        elif simple_augments and np.random.rand() < 0.5:
+            images = simple_augments(images)
+            use_mixed = False
+        else:
+            use_mixed = False
         
-        optimizer.zero_grad(set_to_none=True)
+        # optimizer.zero_grad(set_to_none=True)
         
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):
             outputs = model(images)
-            loss = criterion(outputs, labels)
+            
+            if use_mixed:
+                loss = (mixup or cutmix).loss_function(criterion, outputs, labels_a, labels_b, lam)
+            else:
+                loss = criterion(outputs, labels)
+            
+            loss = loss / grad_accum_steps
         
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        if scheduler:
-            scheduler.step()
-
-        running_loss += loss.item() * images.size(0)
         
-        # Critical fix: detach before converting to prevent memory leak
-        _, predicted = outputs.detach().max(1)
-        all_preds.extend(predicted.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+        # Gradient accumulation
+        if (batch_idx + 1) % grad_accum_steps == 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            
+            if scheduler and isinstance(scheduler, (
+                optim.lr_scheduler.OneCycleLR,
+                optim.lr_scheduler.SequentialLR
+            )):
+                scheduler.step()
+        
+        running_loss += loss.item() * grad_accum_steps * images.size(0)
+        
+        # Collect stats (use original labels for mixup/cutmix)
+        if not use_mixed:
+            _, predicted = outputs.detach().max(1)
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
     total_loss = running_loss / len(loader.dataset)
-    acc = accuracy_score(all_labels, all_preds) * 100.0
+    
+    if all_preds:  # Only calculate accuracy if we have non-mixed batches
+        acc = accuracy_score(all_labels, all_preds) * 100.0
+    else:
+        acc = 0.0  # All batches were mixed
     
     return total_loss, acc
 
@@ -245,7 +516,7 @@ def validate_one_epoch(model, loader, criterion):
     all_labels = []
     
     with torch.inference_mode():
-        for images, labels in loader:
+        for images, labels in loader :
             images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
             
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):
@@ -328,9 +599,7 @@ def reshape_transform_swin(tensor, height=7, width=7):
     result = result.permute(0, 3, 1, 2)
     return result
 
-
 class NativeGradCAM:
-    
     def __init__(self, model, target_layer, reshape_transform=None):
         self.model = model.eval()
         self.reshape_transform = reshape_transform
@@ -406,6 +675,7 @@ def generate_gradcam_plot(model, input_tensor, original_img_np, target_layer, re
 
 
 class Visualizer:
+    
     def __init__(self, experiment_name, model_name, class_names, transform=None, logger=None):
         self.experiment_name = experiment_name
         self.model_name = model_name
@@ -968,64 +1238,109 @@ class Visualizer:
         
         return results
 
+from sklearn.metrics import (
+    accuracy_score, 
+    roc_auc_score, 
+    cohen_kappa_score, 
+    classification_report, 
+    confusion_matrix,
+    matthews_corrcoef,
+    jaccard_score
+)
 
-def test_model(model_name, model, loader, classes, experiment_name, history, logger: Logger, visualizer: Visualizer = None):
+
+def test_model(model_name, model, loader, classes, experiment_name, history, logger: Logger, 
+               visualizer: Visualizer = None, use_tta=True):
     model.eval()
     all_preds = []
     all_labels = []
     all_probs = []
     
     logger.info(f"--- Starting Evaluation: {experiment_name} ---")
+    if use_tta:
+        logger.info("Using Test-Time Augmentation (TTA) for improved accuracy")
+        tta_model = TTAWrapper(model, num_augmentations=5)
     
-    # Inference loop with proper memory management
-    with torch.inference_mode():
-        for images, labels in loader :
-            images = images.to(DEVICE, non_blocking=True)
-            labels = labels.to(DEVICE, non_blocking=True)
+    # Inference Loop
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
             
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == 'cuda')):
+            if use_tta:
+                # Use TTA
+                probs = tta_model(images)
+                preds = torch.argmax(probs, dim=1)
+            else:
+                # Standard inference
                 outputs = model(images)
+                probs = torch.softmax(outputs, dim=1)
+                preds = torch.argmax(outputs, dim=1)
             
-            probs = torch.softmax(outputs, dim=1)
-            preds = torch.argmax(outputs, dim=1)
-            
-            # Transfer to CPU after detaching
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
-    
-    # Convert to numpy arrays
+            
+    # Convert to numpy
     y_true = np.array(all_labels)
     y_pred = np.array(all_preds)
     y_prob = np.array(all_probs)
     
-    # Calculate comprehensive metrics
+    # ============================================================================
+    # NaN Detection and Handling
+    # ============================================================================
+    if np.isnan(y_prob).any():
+        logger.warning("⚠️  NaN detected in probability outputs!")
+        logger.warning("   This usually indicates model collapse to single-class prediction.")
+        logger.warning("   Replacing NaN with uniform distribution for metric calculation.")
+        n_classes = len(classes)
+        y_prob = np.nan_to_num(y_prob, nan=1.0/n_classes)
+    
+    # Verify probabilities sum to 1.0 (within tolerance)
+    prob_sums = y_prob.sum(axis=1)
+    if not np.allclose(prob_sums, 1.0, atol=1e-3):
+        logger.warning("⚠️  Probability distributions don't sum to 1.0!")
+        logger.warning(f"   Sum range: [{prob_sums.min():.4f}, {prob_sums.max():.4f}]")
+        # Normalize to ensure sum=1
+        y_prob = y_prob / prob_sums[:, np.newaxis]
+        logger.warning("   Probabilities normalized to sum=1.0")
+    
+    # ============================================================================
+    # Calculate Metrics
+    # ============================================================================
     accuracy = accuracy_score(y_true, y_pred) * 100
     
+    # ROC AUC with improved error handling
     try:
         if len(classes) == 2:
             roc_auc = roc_auc_score(y_true, y_prob[:, 1])
         else:
             roc_auc = roc_auc_score(y_true, y_prob, multi_class='ovr', average='macro')
-    except Exception as e:
+    except ValueError as e:
         logger.warning(f"ROC AUC calculation failed: {e}")
         roc_auc = 0.0
-    
+    except Exception as e:
+        logger.warning(f"Unexpected error in ROC AUC calculation: {e}")
+        roc_auc = 0.0
+        
     kappa = cohen_kappa_score(y_true, y_pred)
     corrcoef = matthews_corrcoef(y_true, y_pred)
     jaccard = jaccard_score(y_true, y_pred, average="weighted")
     
-    # Generate comprehensive text report
+    # ============================================================================
+    # Generate Report
+    # ============================================================================
     report_path = os.path.join(REPORTS_DIR, f"{experiment_name}.txt")
     
     with open(report_path, "w") as f:
         f.write(f"===== COMPREHENSIVE ANALYSIS REPORT: {experiment_name} =====\n\n")
+        f.write(f"Test-Time Augmentation (TTA): {'Enabled' if use_tta else 'Disabled'}\n\n")
         f.write("--- Overall Performance ---\n")
         f.write(f"Overall Accuracy: {accuracy:.2f}%\n")
-        f.write(f"Macro ROC AUC: {roc_auc:.4f}\n")
-        f.write(f"Cohen's Kappa: {kappa:.4f}\n")
-        f.write(f"Matthews Correlation Coefficient (MCC): {corrcoef:.4f}\n")
-        f.write(f"Jaccard Score: {jaccard:.4f}\n\n")
+        f.write(f"Macro ROC AUC:    {roc_auc:.4f}\n")
+        f.write(f"Cohen's Kappa:    {kappa:.4f}\n")
+        f.write(f"Matthews Correlation Coefficient (MCC):    {corrcoef:.4f}\n")
+        f.write(f"Jaccard Score:    {jaccard:.4f}\n\n")
         
         f.write("--- Detailed Per-Class Metrics ---\n")
         f.write(classification_report(y_true, y_pred, target_names=classes, digits=4))
@@ -1033,6 +1348,7 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
         f.write("\n--- Per-Class Specificity & Confusion Matrix Stats ---\n")
         cm = confusion_matrix(y_true, y_pred)
         
+        # Calculate Specificity per class
         for i, class_name in enumerate(classes):
             tp = cm[i, i]
             fp = cm[:, i].sum() - tp
@@ -1040,19 +1356,20 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
             tn = cm.sum() - (tp + fp + fn)
             
             specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-            f.write(f"{class_name:<20}: Specificity: {specificity:.4f}, TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}\n")
-    
+            f.write(f"{class_name:<20}: Specificity: {specificity:.4f}, "
+                   f"TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}\n")
+            
     logger.info(f"✅ Report saved to: {report_path}")
 
-    # Generate all visualization plots
-    if visualizer is None:
-        visualizer = Visualizer(
-            experiment_name=experiment_name, 
-            model_name=model_name, 
-            class_names=classes, 
-            logger=logger
-        )
-    
+    # ============================================================================
+    # Generate Visualizations
+    # ============================================================================
+    visualizer = visualizer or Visualizer(
+        experiment_name=experiment_name, 
+        model_name=model_name, 
+        class_names=classes, 
+        logger=logger
+    )
     visualizer.generate_all_plots(
         y_true=y_true, 
         y_prob=y_prob, 
@@ -1069,36 +1386,92 @@ def test_model(model_name, model, loader, classes, experiment_name, history, log
         'corrcoef': corrcoef,
         'jaccard': jaccard,
         'y_true': y_true,
-        'y_prob': y_prob
+        'y_prob': y_prob,
+        'y_pred': y_pred,  # Add predictions for ensemble
     }
     
     return metrics_dict
 
 
 class Cross_Validator:
-    def __init__(self, model_names, logger: Logger, use_aug=False):
+    def __init__(self, model_names, logger: Logger, use_aug=False, strategy='simple_cosine', enable_ensemble=False):
         self.model_names = model_names
         self.results = []
         self.use_aug = use_aug
+        self.strategy_name = strategy
         self.logger = logger
+        self.enable_ensemble = enable_ensemble
         self.master_file = os.path.join(RESULTS_DIR, "master_results.csv")
         self.models_dir = os.path.join(RESULTS_DIR, "best_models")
 
-        os.makedirs(self.models_dir, exist_ok=True)
+        # Ensemble tracking
+        self.ensemble_predictions = []  # List of (model_name, y_pred, y_prob)
+        self.test_labels = None  # Shared test labels
+
+        os.makedirs(self.models_dir, exist_ok = True)
         self.logger.debug(f"Models for cross-validation: {self.model_names}")
         self.logger.debug(f"GPU Augmentation: {self.use_aug}")
+        self.logger.debug(f"Training Strategy: {self.strategy_name}")
+        self.logger.debug(f"Ensemble mode: {self.enable_ensemble}")
         self.logger.debug(f"Master results file: {self.master_file}")
 
     def run(self):
         master_df = None
         if os.path.exists(self.master_file):
             master_df = pd.read_csv(self.master_file)
-            self.logger.debug(f"Loaded existing results from {self.master_file}")
+            self.logger.debug(f"Master df exists -> {self.master_file}")
+        
+        # Load dataset ONCE (file paths only)
+        self.logger.info("\n" + "="*80)
+        self.logger.info("LOADING DATASET (ONCE FOR ALL MODELS)")
+        self.logger.info("="*80)
+        self.logger.info(f"Loading dataset from: {DATA_DIR}")
+        
+        # Load with minimal transform (just to get file paths and labels)
+        temp_transform = transforms.Compose([transforms.ToTensor()])
+        base_dataset = FullDataset(DATA_DIR, temp_transform)
+        
+        targets = np.array(base_dataset.targets)
+        classes = base_dataset.classes
+        file_paths = [sample[0] for sample in base_dataset.samples]  # Extract file paths
+        
+        self.logger.info(f"Total samples: {len(targets)}")
+        self.logger.debug(f"Classes found: {classes}")
+        
+        # Calculate Class Weights (same for all models)
+        class_counts = np.bincount(targets)
+        total_samples = len(targets)
+        class_weights = total_samples / (len(classes) * class_counts)
+        class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
+        
+        self.logger.info("="*80)
+        self.logger.info("CLASS DISTRIBUTION & WEIGHTS:")
+        for i, cls in enumerate(classes):
+            self.logger.info(f"  {cls:<20}: {class_counts[i]:>4} samples "
+                           f"({100*class_counts[i]/total_samples:>5.1f}%) | Weight: {class_weights[i]:.3f}")
+        self.logger.info("="*80)
+        
+        # Train/Test Split ONCE (same test set for all models)
+        train_val_indices, test_indices = train_test_split(
+            np.arange(len(targets)),
+            test_size=TEST_SPLIT,
+            stratify=targets,
+            random_state=42  # ← Deterministic split
+        )
+        
+        self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
+        self.logger.info("✅ All models will use the SAME test set (enables ensembling)")
+        
+        # Store test labels for ensemble
+        self.test_labels = targets[test_indices]
+        
+        train_val_targets = targets[train_val_indices]
         
         skf = StratifiedKFold(n_splits=NFOLDS, shuffle=True, random_state=42)
         
+        # Train each model with model-specific transforms
         for model_name in self.model_names:
-            experiment_name = f"{model_name}_pre={PRETRAINED}_aug={self.use_aug}"
+            experiment_name = f"{model_name}_pre={PRETRAINED}_aug={self.use_aug}_strat={self.strategy_name}"
             checkpoint_path = os.path.join(self.models_dir, f"{experiment_name}_best_model.pth")
             
             self.logger.info("\n" + "="*80)
@@ -1108,9 +1481,10 @@ class Cross_Validator:
             # Skip if already completed
             if master_df is not None:
                 existing = master_df[
-                    (master_df['model_name'] == model_name) & 
-                    (master_df['pretrained'] == PRETRAINED) & 
-                    (master_df['augmentation'] == self.use_aug)
+                    (master_df['model_name'] == model_name) &
+                    (master_df['pretrained'] == PRETRAINED) &
+                    (master_df['augmentation'] == self.use_aug) &
+                    (master_df['strategy'] == self.strategy_name)
                 ]
                 if not existing.empty:
                     self.logger.info(">> Experiment already completed. Skipping.")
@@ -1121,41 +1495,46 @@ class Cross_Validator:
             img_size = get_img_size(model_name)
             self.logger.debug(f"Image size for {model_name}: {img_size}")
 
-            base_transform = get_base_transformations(img_size)
+            model_transform = get_base_transformations(img_size)
 
             # Load dataset
             self.logger.info(f"Loading dataset from: {DATA_DIR}")
-            full_dataset = FullDataset(DATA_DIR, base_transform)
-            targets = np.array(full_dataset.targets)
-            classes = full_dataset.classes
-            self.logger.debug(f"Classes found: {classes}")
+            full_dataset = FullDataset(DATA_DIR, model_transform)
+            # targets = np.array(full_dataset.targets)
+            # classes = full_dataset.classes
+            # self.logger.debug(f"Classes found: {classes}")
 
-            # Stratified train-test split
-            train_val_indices, test_indices = train_test_split(
-                np.arange(len(targets)),
-                test_size=TEST_SPLIT,
-                stratify=targets,
-                random_state=42
-            )
+            # # Calculate Class Weights
+            # class_counts = np.bincount(targets)
+            # total_samples = len(targets)
+            # class_weights = total_samples / (len(classes) * class_counts)
+            # class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
             
-            test_subset = Subset(full_dataset, test_indices)
-            test_loader = DataLoader(
-                test_subset, 
-                batch_size=BATCH_SIZE, 
-                shuffle=False, 
-                num_workers=NUM_WORKERS, 
-                pin_memory=PIN_MEMORY,
-                persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
-            )
-            self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
+            # self.logger.info("="*80)
+            # self.logger.info("CLASS DISTRIBUTION & WEIGHTS:")
+            # for i, cls in enumerate(classes):
+            #     self.logger.info(f"  {cls:<20}: {class_counts[i]:>4} samples ({100*class_counts[i]/total_samples:>5.1f}%) | Weight: {class_weights[i]:.3f}")
+            # self.logger.info("="*80)
 
-            train_val_targets = targets[train_val_indices]
+            # # Stratified train-test split
+            # train_val_indices, test_indices = train_test_split(
+            #     np.arange(len(targets)),
+            #     test_size=TEST_SPLIT,
+            #     stratify=targets,
+            #     random_state=42
+            # )
+            
+            # self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
+
+            # train_val_targets = targets[train_val_indices]
 
             self.logger.info(f"\n=== Cross-validating: {model_name} ===")
             fold_metrics = []
             
             for fold, (fold_train_idx_rel, fold_val_idx_rel) in enumerate(skf.split(train_val_indices, train_val_targets)):
                 self.logger.info(f"  [Fold {fold+1}/{NFOLDS}]")
+
+                self.logger.info(f"Making Datasets{', Data Loaders and GPU Augmenter' if self.use_aug else ' and Data Loaders'}")
                 
                 train_idx = train_val_indices[fold_train_idx_rel]
                 val_idx = train_val_indices[fold_val_idx_rel]
@@ -1163,9 +1542,6 @@ class Cross_Validator:
                 train_ds = Subset(full_dataset, train_idx)
                 val_ds = Subset(full_dataset, val_idx)
 
-                # GPU augmentation
-                gpu_augmenter = get_gpu_augmentations(img_size) if self.use_aug else None
-                
                 train_loader = DataLoader(
                     train_ds, 
                     batch_size=BATCH_SIZE, 
@@ -1183,7 +1559,9 @@ class Cross_Validator:
                     persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
                 )
 
-                # Model initialization
+                self.logger.info("Initializing Model, Optimizer, Scaler and Scheduler")
+
+                # Model Setup
                 try:
                     model = get_model(model_name, num_classes=len(classes), pretrained=PRETRAINED)
                     model = model.to(DEVICE)
@@ -1191,54 +1569,69 @@ class Cross_Validator:
                     self.logger.error(f"Failed to load {model_name}: {e}")
                     break
 
-                # Optimizer and scheduler setup
-                optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
-                criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-                scaler = torch.amp.GradScaler(enabled=USE_AMP)
-                
-                # OneCycleLR requires per-batch stepping
-                scheduler = optim.lr_scheduler.OneCycleLR(
-                    optimizer, 
-                    max_lr=1e-3, 
-                    epochs=EPOCHS, 
-                    steps_per_epoch=len(train_loader), 
-                    pct_start=0.3,
-                    div_factor=25.0,
-                    final_div_factor=100.0
+                # Get training strategy
+                strategy = Training_Strategy.get_strategy(self.strategy_name)(
+                    model,
+                    img_size,
+                    lr=LR,
+                    epochs=EPOCHS,
+                    steps_per_epoch=len(train_loader),
+                    num_classes=len(classes),
+                    use_aug = self.use_aug,
+                    class_weights_tensor=class_weights_tensor if self.strategy_name != 'simple_cosine' else None
                 )
+                
+                strategy_desc = strategy.setup()
+                
+                scaler = torch.amp.GradScaler(enabled=USE_AMP)
 
-                self.logger.debug(f"Using scaler -> {scaler}")
-                self.logger.debug(f"Using scheduler -> {scheduler}")
+                self.logger.info(f"Using Strategy: {strategy_desc}")
+                self.logger.debug(f"Using criterion: CrossEntropyLoss with class weights")
+                self.logger.debug(f"Using scaler: {scaler}")
 
                 best_acc = 0.0
                 training_history = []
                 best_stats = {}
+                patience_counter = 0
+                step = EPOCHS / 20
+                curr = step
+
+                self.logger.info("Starting training and validation epochs")
+                print("\t\tProcessing [", end = "")
                 
                 for epoch in range(EPOCHS):
-                    # Training phase
+                    # Train
                     t_loss, t_acc = train_one_epoch(
-                        model, train_loader, criterion, optimizer, scaler, gpu_augmenter, scheduler
+                        model, train_loader, strategy.criterion, strategy.optimizer, 
+                        scaler, strategy, strategy.scheduler
                     )
                     
-                    # Validation phase
+                    # Validate
                     v_loss, v_acc, v_prec, v_rec, v_f1 = validate_one_epoch(
-                        model, val_loader, criterion
+                        model, val_loader, strategy.criterion
                     )
+                    
+                    # Step epoch-based schedulers
+                    if strategy.scheduler and not isinstance(strategy.scheduler, (
+                        optim.lr_scheduler.OneCycleLR,
+                        optim.lr_scheduler.SequentialLR
+                    )):
+                        strategy.scheduler.step()
                     
                     training_history.append({
-                        'epoch': epoch, 
-                        'train_acc': t_acc, 
-                        'train_loss': t_loss, 
-                        'val_acc': v_acc, 
-                        'val_loss': v_loss, 
-                        'val_prec': v_prec, 
-                        'val_rec': v_rec, 
+                        'epoch': epoch,
+                        'train_acc': t_acc,
+                        'train_loss': t_loss,
+                        'val_acc': v_acc,
+                        'val_loss': v_loss,
+                        'val_prec': v_prec,
+                        'val_rec': v_rec,
                         'val_f1': v_f1
                     })
 
-                    # Save best model
-                    if v_acc > best_acc:
-                        self.logger.debug(f"[{v_acc:.2f}] New best validation accuracy for model {model_name}")
+                    # Check for improvement
+                    if v_acc > best_acc + MIN_DELTA:
+                        self.logger.debug(f"[Epoch {epoch+1}] New best validation accuracy: {v_acc:.2f}% (improved by {v_acc - best_acc:.2f}%)")
                         best_acc = v_acc
                         best_stats = {
                             'val_acc': v_acc, 'val_loss': v_loss,
@@ -1246,16 +1639,28 @@ class Cross_Validator:
                             'train_acc': t_acc, 'train_loss': t_loss
                         }
                         torch.save(model.state_dict(), checkpoint_path)
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= PATIENCE:
+                            self.logger.info(f"[Epoch {epoch+1}] Early stopping triggered (no improvement for {PATIENCE} epochs)")
+                            print("#" * int(20 - curr // step + 1), end = "")
+                            break
                     
                     # Periodic GPU cache clearing
                     if (epoch + 1) % EMPTY_CACHE_FREQUENCY == 0:
                         torch.cuda.empty_cache()
+                    
+                    if epoch >= curr :
+                        print("#", end = "")
+                        curr += step
+                print("]")
                 
                 self.logger.info(
                     f"-> Best Val Acc: {best_acc:.2f}% | "
-                    f"F1: {best_stats['val_f1']:.4f} | "
-                    f"Precision: {best_stats['val_prec']:.4f} | "
-                    f"Recall: {best_stats['val_rec']:.4f}"
+                    f"F1: {best_stats.get('val_f1', 0):.4f} | "
+                    f"Precision: {best_stats.get('val_prec', 0):.4f} | "
+                    f"Recall: {best_stats.get('val_rec', 0):.4f}"
                 )
 
                 fold_metrics.append({
@@ -1263,20 +1668,28 @@ class Cross_Validator:
                     **best_stats
                 })
 
-                # Critical: cleanup GPU memory between folds
-                del model, optimizer, scheduler, scaler, train_loader, val_loader
-                if gpu_augmenter is not None:
-                    del gpu_augmenter
+                # Cleanup
+                del model, strategy, scaler, train_loader, val_loader
                 torch.cuda.empty_cache()
                 gc.collect()
                 self.logger.info(f"Fold {fold + 1} cleanup completed")
-
+            
+            test_subset = Subset(full_dataset, test_indices)
+            test_loader = DataLoader(
+                test_subset, 
+                batch_size=BATCH_SIZE, 
+                shuffle=False, 
+                num_workers=NUM_WORKERS, 
+                pin_memory=PIN_MEMORY,
+                persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
+            )
+            
             # Post-training evaluation on test set
             visualizer = Visualizer(
                 experiment_name=experiment_name, 
                 model_name=model_name, 
                 class_names=classes, 
-                transform=base_transform, 
+                transform=model_transform, 
                 logger=self.logger
             )
             
@@ -1291,6 +1704,16 @@ class Cross_Validator:
 
             final_accuracy = metrics["accuracy"]
             self.logger.info(f"[{final_accuracy:.2f}%] Final test accuracy")
+
+            # Save predictions for ensemble
+            if self.enable_ensemble:
+                self.ensemble_predictions.append({
+                    'model_name': model_name,
+                    'y_pred': metrics['y_pred'],  # Predicted labels
+                    'y_prob': metrics['y_prob'],  # Predicted probabilities
+                    'accuracy': final_accuracy
+                })
+                self.logger.info(f"✅ Predictions saved for ensemble ({len(self.ensemble_predictions)}/{len(self.model_names)})")
             
             # Aggregate fold results
             aggregate_fold_results = {}
@@ -1310,6 +1733,7 @@ class Cross_Validator:
                 'model_name': [model_name],
                 'pretrained': [PRETRAINED],
                 'augmentation': [self.use_aug],
+                'strategy': [self.strategy_name],
                 'best_val_accuracy': [f"{best_acc:.2f}%"],
                 'final_test_accuracy': [f"{final_accuracy:.2f}%"],
                 'total_epochs': [EPOCHS],
@@ -1319,31 +1743,79 @@ class Cross_Validator:
             }
             
             pd.DataFrame(results_data).to_csv(
-                self.master_file, 
-                mode='a', 
-                header=not os.path.exists(self.master_file), 
+                self.master_file,
+                mode='a',
+                header=not os.path.exists(self.master_file),
                 index=False
             )
             self.logger.info(f"Results appended to {self.master_file}")
             self.logger.info(f"EXPERIMENT FINISHED: {experiment_name.upper()}")
 
             # Final cleanup
-            del eval_model, test_loader
+            del full_dataset, eval_model, test_loader
             torch.cuda.empty_cache()
             gc.collect()
         
+         # ENSEMBLE: Combine predictions from all models
+        if self.enable_ensemble and len(self.ensemble_predictions) > 1:
+            self.logger.info("\n" + "="*80)
+            self.logger.info("RUNNING ENSEMBLE PREDICTION")
+            self.logger.info("="*80)
+            self._run_ensemble(classes)
+        
         self.logger.info("\n>>> Batch Complete.")
-
+    
+    def _run_ensemble(self, classes):
+        self.logger.info(f"Ensembling {len(self.ensemble_predictions)} models:")
+        for pred in self.ensemble_predictions:
+            self.logger.info(f"  - {pred['model_name']}: {pred['accuracy']:.2f}%")
+        
+        # Average probabilities
+        all_probs = np.array([pred['y_prob'] for pred in self.ensemble_predictions])
+        ensemble_probs = all_probs.mean(axis=0)
+        ensemble_preds = np.argmax(ensemble_probs, axis=1)
+        
+        # Calculate ensemble accuracy
+        from sklearn.metrics import accuracy_score, classification_report
+        ensemble_accuracy = accuracy_score(self.test_labels, ensemble_preds) * 100
+        
+        self.logger.info("\n" + "="*80)
+        self.logger.info(f"🏆 ENSEMBLE ACCURACY: {ensemble_accuracy:.2f}%")
+        self.logger.info("="*80)
+        
+        # Detailed report
+        self.logger.info("\nEnsemble Classification Report:")
+        report = classification_report(self.test_labels, ensemble_preds, target_names=classes, digits=4)
+        self.logger.info("\n" + report)
+        
+        # Save ensemble results
+        ensemble_results = {
+            'model_name': ['ENSEMBLE'],
+            'pretrained': [PRETRAINED],
+            'augmentation': [self.use_aug],
+            'strategy': [self.strategy_name],
+            'num_models': [len(self.ensemble_predictions)],
+            'final_test_accuracy': [f"{ensemble_accuracy:.2f}%"],
+            'individual_accuracies': [', '.join([f"{p['accuracy']:.2f}%" for p in self.ensemble_predictions])],
+        }
+        
+        pd.DataFrame(ensemble_results).to_csv(
+            self.master_file, mode='a', header=False, index=False
+        )
+        
+        self.logger.info(f"✅ Ensemble results saved to {self.master_file}")
 
 def run_batch():
     models = __models_list__
     use_aug = __augmentation__
+    strategy = __strategy__
+    enable_ensemble = __ensemble__
 
     logger = Logger("batch_" + str(hash(str(models)))[:8])
     logger.info(f"Starting validation for {models}")
     
     try:
-        validator = Cross_Validator(models, logger, use_aug=use_aug)
+        validator = Cross_Validator(models, logger, use_aug=use_aug, strategy = strategy, enable_ensemble = enable_ensemble)
         validator.run()
         logger.info("Validation complete")
     except Exception as e:
