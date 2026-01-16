@@ -17,7 +17,7 @@ from .utils import *
 from .config import *
 from .visualization import Visualizer
 from .test import test_model
-from classifiers import get_classifier, BaseClassifier
+from classifiers import list_classifiers, get_classifier, BaseClassifier
 
 
 class Cross_Validator:
@@ -109,19 +109,25 @@ class Cross_Validator:
         # Train each model
         for model_name in self.model_names:
             # Get classifier type (default to 'simple' if not specified)
-            classifier_type = self.model_classifier_map.get(model_name, 'baseline')
+            classifier_type_input = self.model_classifier_map.get(model_name, 'baseline')
+
+            if classifier_type_input == "all" :
+                classifiers_to_be_used = list_classifiers()
+            else :
+                classifiers_to_be_used = [classifier_type_input]
             
-            self._run_classifier(
-                model_name=model_name,
-                classifier_type=classifier_type,
-                base_dataset=base_dataset,
-                train_val_indices=train_val_indices,
-                test_indices=test_indices,
-                targets=targets,
-                classes=classes,
-                skf=skf,
-                master_df=master_df
-            )
+            for classifier_type in classifiers_to_be_used :
+                self._run_classifier(
+                    model_name=model_name,
+                    classifier_type=classifier_type,
+                    base_dataset=base_dataset,
+                    train_val_indices=train_val_indices,
+                    test_indices=test_indices,
+                    targets=targets,
+                    classes=classes,
+                    skf=skf,
+                    master_df=master_df
+                )
         
         self.logger.info("\n>>> Batch Complete.")
 

@@ -93,7 +93,7 @@ CLASSIFIER_REGISTRY = {
     'metric_learning': MetricLearningClassifier,
     'regularized': RegularizedClassifier,
     'attention_enhanced': AttentionEnhancedClassifier,
-    'progressive': ProgressiveClassifier,  # Your ProgressiveFineTuner
+    'progressive': ProgressiveClassifier,
     'progressive_evidential': ProgressiveEvidentialClassifier,
     'clinical_grade': ClinicalGradeClassifier,
     'hybrid_transformer': HybridTransformerClassifier,
@@ -138,7 +138,7 @@ def get_classifier(classifier_type: str = 'simple') :
     return CLASSIFIER_REGISTRY[classifier_type]
 
 
-def list_classifiers():
+def list_classifiers(display : bool = False):
     """List all available classifiers with categories."""
     print("\n" + "="*80)
     print("AVAILABLE CLASSIFIERS")
