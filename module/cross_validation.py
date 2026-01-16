@@ -17,38 +17,42 @@ from .utils import *
 from .config import *
 from .visualization import Visualizer
 from .test import test_model
-from .progressive_finetuning import ProgressiveFineTuner
+from classifiers import get_classifier, BaseClassifier
 
 
 class Cross_Validator:
     """
-    Handles k-fold cross-validation for multiple model architectures
+    Unified k-fold cross-validation for all classifier types.
     
     Key features:
-    - Stratified k-fold splitting to maintain class distribution
-    - GPU memory management between folds
-    - Checkpoint saving for best models
+    - Single execution path for all classifiers
+    - Stratified k-fold splitting
+    - GPU memory management
     - Comprehensive metric tracking
     """
-    def __init__(self, model_names, logger: Logger, use_aug=False, strategy='simple_cosine', enable_ensemble=False):
+    
+    def __init__(self, model_names, logger: Logger, model_classifier_map=None):
+        """
+        Args:
+            model_names: List of model names to train
+            logger: Logger instance
+            model_classifier_map: Dict mapping model_name -> classifier_type
+                                 If None or model not in map, uses 'simple' classifier
+                                 Example: {'resnet18': 'progressive', 'efficientnet_b4': 'ultimate'}
+        """
         self.model_names = model_names
         self.results = []
-        self.use_aug = use_aug
-        self.strategy_name = strategy
         self.logger = logger
-        self.enable_ensemble = enable_ensemble
         self.master_file = os.path.join(RESULTS_DIR, "master_results.csv")
         self.models_dir = os.path.join(RESULTS_DIR, "best_models")
-
-        # Ensemble tracking
-        self.ensemble_predictions = []  # List of (model_name, y_pred, y_prob)
-        self.test_labels = None  # Shared test labels
-
+        
+        # Classifier mapping
+        self.model_classifier_map = model_classifier_map or {}
+        
         os.makedirs(self.models_dir, exist_ok = True)
+        
         self.logger.debug(f"Models for cross-validation: {self.model_names}")
-        self.logger.debug(f"GPU Augmentation: {self.use_aug}")
-        self.logger.debug(f"Training Strategy: {self.strategy_name}")
-        self.logger.debug(f"Ensemble mode: {self.enable_ensemble}")
+        self.logger.debug(f"Classifier mapping: {self.model_classifier_map}")
         self.logger.debug(f"Master results file: {self.master_file}")
 
     def run(self):
@@ -58,13 +62,12 @@ class Cross_Validator:
             master_df = pd.read_csv(self.master_file)
             self.logger.debug(f"Master df exists -> {self.master_file}")
         
-        # Load dataset ONCE (file paths only)
+        # Load dataset ONCE
         self.logger.info("\n" + "="*80)
         self.logger.info("LOADING DATASET (ONCE FOR ALL MODELS)")
         self.logger.info("="*80)
         self.logger.info(f"Loading dataset from: {DATA_DIR}")
         
-        # Load with minimal transform (just to get file paths and labels)
         temp_transform = transforms.Compose([transforms.ToTensor()])
         base_dataset = FullDataset(DATA_DIR, temp_transform)
 
@@ -72,7 +75,6 @@ class Cross_Validator:
         
         targets = np.array(base_dataset.targets)
         classes = base_dataset.classes
-        file_paths = [sample[0] for sample in base_dataset.samples]  # Extract file paths
         
         self.logger.info(f"Total samples: {len(targets)}")
         self.logger.debug(f"Classes found: {classes}")
@@ -95,235 +97,258 @@ class Cross_Validator:
             np.arange(len(targets)),
             test_size=TEST_SPLIT,
             stratify=targets,
-            random_state=42  # ← Deterministic split
+            random_state=42
         )
         
         self.logger.info(f"Data split: {len(train_val_indices)} train/val, {len(test_indices)} test")
-        self.logger.info("✅ All models will use the SAME test set (enables ensembling)")
-        
-        # Store test labels for ensemble
-        self.test_labels = targets[test_indices]
         
         train_val_targets = targets[train_val_indices]
         
         skf = StratifiedKFold(n_splits=NFOLDS, shuffle=True, random_state=42)
         
-        # Train each model with model-specific transforms
+        # Train each model
         for model_name in self.model_names:
-            experiment_name = f"{model_name}_pre={PRETRAINED}_aug={self.use_aug}_strat={self.strategy_name}"
-            checkpoint_path = os.path.join(self.models_dir, f"{experiment_name}_best_model.pth")
+            # Get classifier type (default to 'simple' if not specified)
+            classifier_type = self.model_classifier_map.get(model_name, 'baseline')
             
-            self.logger.info("\n" + "="*80)
-            self.logger.info(f"STARTING EXPERIMENT: {experiment_name.upper()}")
-            self.logger.info("="*80)
+            self._run_classifier(
+                model_name=model_name,
+                classifier_type=classifier_type,
+                base_dataset=base_dataset,
+                train_val_indices=train_val_indices,
+                test_indices=test_indices,
+                targets=targets,
+                classes=classes,
+                skf=skf,
+                master_df=master_df
+            )
+        
+        self.logger.info("\n>>> Batch Complete.")
 
-            # Skip if already completed
-            if master_df is not None:
-                existing = master_df[
-                    (master_df['model_name'] == model_name) &
-                    (master_df['pretrained'] == PRETRAINED) &
-                    (master_df['augmentation'] == self.use_aug) &
-                    (master_df['strategy'] == self.strategy_name)
-                ]
-                if not existing.empty:
-                    self.logger.info(">> Experiment already completed. Skipping.")
-                    self.logger.info(existing.to_string())
-                    self.logger.info("="*80)
-                    continue
+    def _run_classifier(self, model_name, classifier_type, base_dataset, 
+                       train_val_indices, test_indices, targets, classes, skf, master_df):
+        """
+        Unified training method for ALL classifier types.
+        
+        Flow:
+        1. Check if already completed
+        2. Get classifier class from registry
+        3. Create model-specific dataset
+        4. Run k-fold CV with classifier.fit()
+        5. Evaluate on test set with classifier.evaluate()
+        6. Generate visualizations (including GradCAM if model available)
+        7. Save unified results
+        """
+        experiment_name = f"{model_name}_classifier={classifier_type}_metric={OPTIMIZE_METRIC}"
+        checkpoint_path = os.path.join(self.models_dir, f"{experiment_name}_best_weights.pth")
+        fold_checkpoint_path = os.path.join(self.models_dir, f"{experiment_name}_best_fold.pth")
+        
+        self.logger.info("\n" + "="*80)
+        self.logger.info(f"STARTING EXPERIMENT: {experiment_name.upper()}")
+        self.logger.info(f"Using Classifier: {classifier_type}")
+        self.logger.info("="*80)
 
-            img_size = get_img_size(model_name)
-            self.logger.debug(f"Image size for {model_name}: {img_size}")
+        # Skip if already completed
+        if master_df is not None:
+            existing = master_df[
+                (master_df['model_name'] == model_name) &
+                (master_df.get('classifier_type', '') == classifier_type) &
+                (master_df.get('optimize_metric', '') == OPTIMIZE_METRIC)
+            ]
+            if not existing.empty:
+                self.logger.info(">> Experiment already completed. Skipping.")
+                self.logger.info(existing.to_string())
+                self.logger.info("="*80)
+                return
 
-            model_transform = get_base_transformations(img_size)
+        # Get image size and transforms
+        img_size = get_img_size(model_name)
+        self.logger.debug(f"Image size for {model_name}: {img_size}")
+        model_transform = get_base_transformations(img_size)
 
-            # Load dataset
-            self.logger.info(f"Loading dataset from: {DATA_DIR}")
-            full_dataset = FullDataset(DATA_DIR, model_transform)
+        # Load dataset
+        self.logger.info(f"Loading dataset from: {DATA_DIR}")
+        full_dataset = FullDataset(DATA_DIR, model_transform)
 
-            self.logger.info(f"\n=== Cross-validating: {model_name} ===")
-            fold_metrics = []
-
-            self.logger.info("Initializing Fine tuner")
-
-            finetuner = ProgressiveFineTuner(model_name, classes, self.logger, checkpoint_path)
+        self.logger.info(f"\n=== K-Fold Cross-Validation: {model_name} with {classifier_type} ===")
+        
+        train_val_targets = targets[train_val_indices]
+        fold_metrics = []
+        training_histoy = []
+        best_fold = 0
+        best_fold_metric = 0.0
+        
+        # Create fresh classifier instance
+        classifier_class = get_classifier(classifier_type)
+        
+        # K-Fold Cross-Validation
+        for fold, (fold_train_idx_rel, fold_val_idx_rel) in enumerate(skf.split(train_val_indices, train_val_targets)):
+            self.logger.info(f"\n  [Fold {fold+1}/{NFOLDS}]")
             
-            for fold, (fold_train_idx_rel, fold_val_idx_rel) in enumerate(skf.split(train_val_indices, train_val_targets)):
-                self.logger.info(f"  [Fold {fold+1}/{NFOLDS}]")
-
-                self.logger.info(f"Making Datasets{', Data Loaders and GPU Augmenter' if self.use_aug else ' and Data Loaders'}")
-                
-                train_idx = train_val_indices[fold_train_idx_rel]
-                val_idx = train_val_indices[fold_val_idx_rel]
-                
-                train_ds = Subset(full_dataset, train_idx)
-                val_ds = Subset(full_dataset, val_idx)
-
-                train_loader = DataLoader(
-                    train_ds,
-                    batch_size=BATCH_SIZE,
-                    shuffle=True,
-                    num_workers=NUM_WORKERS,
-                    pin_memory=PIN_MEMORY,
-                    persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
-                )
-                val_loader = DataLoader(
-                    val_ds,
-                    batch_size=BATCH_SIZE,
-                    shuffle=False,
-                    num_workers=NUM_WORKERS,
-                    pin_memory=PIN_MEMORY,
-                    persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
-                )
-
-                history, best_stats = finetuner.fit(train_loader, val_loader)
-                training_history.append(history)
-                
-                self.logger.info(
-                    f"-> Best Val Acc: {best_stats.get('val_acc', 0):.2f}% | "
-                    f"F1: {best_stats.get('val_f1', 0):.4f} | "
-                    f"Precision: {best_stats.get('val_prec', 0):.4f} | "
-                    f"Recall: {best_stats.get('val_rec', 0):.4f}"
-                )
-
-                fold_metrics.append({
-                    'fold': fold + 1,
-                    **best_stats
-                })
-
-                # Cleanup
-                del train_loader, val_loader
-                torch.cuda.empty_cache()
-                gc.collect()
-                self.logger.info(f"Fold {fold + 1} cleanup completed")
+            # Get absolute indices
+            train_idx = train_val_indices[fold_train_idx_rel]
+            val_idx = train_val_indices[fold_val_idx_rel]
             
-            test_subset = Subset(full_dataset, test_indices)
-            test_loader = DataLoader(
-                test_subset, 
-                batch_size=BATCH_SIZE, 
-                shuffle=False, 
-                num_workers=NUM_WORKERS, 
+            # Create datasets and loaders
+            train_ds = Subset(full_dataset, train_idx)
+            val_ds = Subset(full_dataset, val_idx)
+            
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=BATCH_SIZE,
+                shuffle=True,
+                num_workers=NUM_WORKERS,
                 pin_memory=PIN_MEMORY,
                 persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
             )
-            
-            # Post-training evaluation on test set
-            visualizer = Visualizer(
-                experiment_name=experiment_name, 
-                model_name=model_name, 
-                class_names=classes, 
-                transform=model_transform, 
-                logger=self.logger
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                pin_memory=PIN_MEMORY,
+                persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
+            )
+            classifier : BaseClassifier = classifier_class(
+                model_name=model_name,
+                num_classes=len(classes),
+                device=DEVICE
             )
             
-            self.logger.info(f"Loading best model from {checkpoint_path}")
-            eval_model = get_model(model_name, num_classes=len(classes), pretrained=False).to(DEVICE)
-            eval_model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE, weights_only=True))
+            self.logger.info(f"  Training {classifier_type} classifier...")
             
-            metrics = test_model(
-                model_name, eval_model, test_loader, classes, 
-                experiment_name, training_history, self.logger, visualizer
+            # Determine if should use SAM (only for clinical_grade and ultimate)
+            use_sam = classifier_type in ['clinical_grade', 'ultimate']
+            
+            # Train classifier - ALL HAVE SAME INTERFACE!
+            history = classifier.fit(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=EPOCHS,
+                lr=LR,
+                use_sam=use_sam,
+                primary_metric=OPTIMIZE_METRIC,
+                patience=PATIENCE,
+                min_delta=MIN_DELTA_METRIC,
+                checkpoint_path = checkpoint_path
             )
-
-            final_accuracy = metrics["accuracy"]
-            self.logger.info(f"[{final_accuracy:.2f}%] Final test accuracy")
-
-            # Save predictions for ensemble
-            if self.enable_ensemble:
-                self.ensemble_predictions.append({
-                    'model_name': model_name,
-                    'y_pred': metrics['y_pred'],  # Predicted labels
-                    'y_prob': metrics['y_prob'],  # Predicted probabilities
-                    'accuracy': final_accuracy
-                })
-                self.logger.info(f"✅ Predictions saved for ensemble ({len(self.ensemble_predictions)}/{len(self.model_names)})")
+            training_histoy.append(history)
             
-            # Aggregate fold results
-            aggregate_fold_results = {}
-            if fold_metrics:
-                df = pd.DataFrame(fold_metrics)
-                aggregate_fold_results = {
-                    'mean_fold_loss': df['val_loss'].mean(),
-                    'mean_fold_acc': df['val_acc'].mean(),
-                    'std_fold_acc': df['val_acc'].std(),
-                    'mean_fold_prec': df['val_prec'].mean(),
-                    'mean_fold_rec': df['val_rec'].mean(),
-                    'mean_fold_f1': df['val_f1'].mean(),
-                }
-
-            # Save results
-            results_data = {
-                'model_name': [model_name],
-                'pretrained': [PRETRAINED],
-                'augmentation': [self.use_aug],
-                'strategy': [self.strategy_name],
-                'best_val_accuracy': [f"{best_stats.get('val_acc', 0):.2f}%"],
-                'final_test_accuracy': [f"{final_accuracy:.2f}%"],
-                'total_epochs': [EPOCHS],
-                'batch_size': [BATCH_SIZE],
-                'n_splits': [NFOLDS],
-                **aggregate_fold_results
-            }
+            # Get best metrics from this fold
+            fold_metric_value = classifier.best_metric_value
             
-            pd.DataFrame(results_data).to_csv(
-                self.master_file,
-                mode='a',
-                header=not os.path.exists(self.master_file),
-                index=False
+            self.logger.info(
+                f"  Fold {fold+1} Best {OPTIMIZE_METRIC.capitalize()}: {fold_metric_value:.4f} | "
+                f"Acc: {classifier.best_acc:.2f}% | "
+                f"Recall: {classifier.best_recall:.4f}"
             )
-            self.logger.info(f"Results appended to {self.master_file}")
-            self.logger.info(f"EXPERIMENT FINISHED: {experiment_name.upper()}")
-
-            # Final cleanup
-            del full_dataset, eval_model, test_loader, finetuner
+            
+            fold_metrics.append({
+                'fold': fold + 1,
+                f'val_{OPTIMIZE_METRIC}': fold_metric_value,
+                'val_acc': classifier.best_acc,
+                'val_recall': classifier.best_recall,
+                'val_f1': classifier.best_f1
+            })
+            
+            # Track best fold
+            if fold_metric_value > best_fold_metric:
+                best_fold = fold
+                best_fold_metric = fold_metric_value
+                # Save best fold checkpoint
+                classifier.save(fold_checkpoint_path)
+                self.logger.info(f"  ✓ Best fold so far! Checkpoint saved.")
+            
+            # Cleanup
+            del classifier, train_loader, val_loader
             torch.cuda.empty_cache()
             gc.collect()
+            self.logger.info(f"Fold {fold + 1} cleanup completed")
         
-         # ENSEMBLE: Combine predictions from all models
-        if self.enable_ensemble and len(self.ensemble_predictions) > 1:
-            self.logger.info("\n" + "="*80)
-            self.logger.info("RUNNING ENSEMBLE PREDICTION")
-            self.logger.info("="*80)
-            self._run_ensemble(classes)
-        
-        self.logger.info("\n>>> Batch Complete.")
-    
-    def _run_ensemble(self, classes):
-        """Ensemble predictions from multiple models."""
-        self.logger.info(f"Ensembling {len(self.ensemble_predictions)} models:")
-        for pred in self.ensemble_predictions:
-            self.logger.info(f"  - {pred['model_name']}: {pred['accuracy']:.2f}%")
-        
-        # Average probabilities
-        all_probs = np.array([pred['y_prob'] for pred in self.ensemble_predictions])
-        ensemble_probs = all_probs.mean(axis=0)
-        ensemble_preds = np.argmax(ensemble_probs, axis=1)
-        
-        # Calculate ensemble accuracy
-        from sklearn.metrics import accuracy_score, classification_report
-        ensemble_accuracy = accuracy_score(self.test_labels, ensemble_preds) * 100
-        
-        self.logger.info("\n" + "="*80)
-        self.logger.info(f"🏆 ENSEMBLE ACCURACY: {ensemble_accuracy:.2f}%")
-        self.logger.info("="*80)
-        
-        # Detailed report
-        self.logger.info("\nEnsemble Classification Report:")
-        report = classification_report(self.test_labels, ensemble_preds, target_names=classes, digits=4)
-        self.logger.info("\n" + report)
-        
-        # Save ensemble results
-        ensemble_results = {
-            'model_name': ['ENSEMBLE'],
-            'pretrained': [PRETRAINED],
-            'augmentation': [self.use_aug],
-            'strategy': [self.strategy_name],
-            'num_models': [len(self.ensemble_predictions)],
-            'final_test_accuracy': [f"{ensemble_accuracy:.2f}%"],
-            'individual_accuracies': [', '.join([f"{p['accuracy']:.2f}%" for p in self.ensemble_predictions])],
+        # Aggregate fold results
+        fold_df = pd.DataFrame(fold_metrics)
+        aggregate_fold_results = {
+            f'mean_fold_{OPTIMIZE_METRIC}': fold_df[f'val_{OPTIMIZE_METRIC}'].mean(),
+            f'std_fold_{OPTIMIZE_METRIC}': fold_df[f'val_{OPTIMIZE_METRIC}'].std(),
+            'mean_fold_acc': fold_df['val_acc'].mean(),
+            'std_fold_acc': fold_df['val_acc'].std(),
+            'mean_fold_recall': fold_df['val_recall'].mean(),
+            'mean_fold_f1': fold_df['val_f1'].mean(),
         }
         
-        pd.DataFrame(ensemble_results).to_csv(
-            self.master_file, mode='a', header=False, index=False
+        self.logger.info(f"\n  K-Fold Summary:")
+        self.logger.info(f"    Mean {OPTIMIZE_METRIC.capitalize()}: {aggregate_fold_results[f'mean_fold_{OPTIMIZE_METRIC}']:.4f} "
+                        f"± {aggregate_fold_results[f'std_fold_{OPTIMIZE_METRIC}']:.4f}")
+        self.logger.info(f"    Best Fold: {best_fold+1} ({best_fold_metric:.4f})")
+        
+        # Test on held-out test set using best fold model
+        self.logger.info(f"\n  Loading best fold model for final evaluation...")
+        
+        test_subset = Subset(full_dataset, test_indices)
+        test_loader = DataLoader(
+            test_subset,
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            num_workers=NUM_WORKERS,
+            pin_memory=PIN_MEMORY,
+            persistent_workers=PERSISTENT_WORKERS if NUM_WORKERS > 0 else False
         )
         
-        self.logger.info(f"✅ Ensemble results saved to {self.master_file}")
+        # Load best fold checkpoint
+        eval_classifier : BaseClassifier = classifier_class(
+            model_name=model_name,
+            num_classes=len(classes),
+            device=DEVICE
+        )
+        eval_classifier.load(checkpoint_path)
+        # eval_classifier.load(fold_checkpoint_path)
+        
+        self.logger.info(f"\n  Final evaluation on test set...")
+        metrics = test_model(
+            model_name=model_name,
+            model=eval_classifier,
+            loader=test_loader,
+            classes=classes,
+            experiment_name=experiment_name,
+            history=training_histoy,
+            logger=self.logger,
+            use_tta=False
+        )
+        
+        final_accuracy = metrics["accuracy"]
+        final_recall = metrics["recall"]
+        
+        self.logger.info(f"\n  Final Test Results:")
+        self.logger.info(f"    Accuracy: {final_accuracy:.2f}%")
+        self.logger.info(f"    Recall: {final_recall:.4f}")
+        self.logger.info(f"    Precision: {metrics['precision']:.4f}")
+        self.logger.info(f"    F1: {metrics['f1']:.4f}")
+        
+        # Save results in unified format
+        results_data = {
+            'model_name': [model_name],
+            'classifier_type': [classifier_type],
+            'optimize_metric': [OPTIMIZE_METRIC],
+            'pretrained': [PRETRAINED],
+            'best_val_metric': [f"{best_fold_metric:.4f}"],
+            'final_test_accuracy': [f"{final_accuracy:.2f}%"],
+            'final_test_recall': [f"{final_recall:.4f}"],
+            'total_epochs': [EPOCHS],
+            'batch_size': [BATCH_SIZE],
+            'n_splits': [NFOLDS],
+            **aggregate_fold_results
+        }
+        
+        pd.DataFrame(results_data).to_csv(
+            self.master_file,
+            mode='a',
+            header=not os.path.exists(self.master_file),
+            index=False
+        )
+        self.logger.info(f"\nResults appended to {self.master_file}")
+        self.logger.info(f"EXPERIMENT FINISHED: {experiment_name.upper()}")
+        
+        # Cleanup
+        del eval_classifier, test_loader, full_dataset
+        torch.cuda.empty_cache()
+        gc.collect()
