@@ -113,7 +113,7 @@ class Cross_Validator:
 
             if classifier_type_input == "all" :
                 classifiers_to_be_used = list_classifiers()
-            else :
+            elif isinstance(classifier_type_input, str) :
                 classifiers_to_be_used = [classifier_type_input]
             
             for classifier_type in classifiers_to_be_used :
