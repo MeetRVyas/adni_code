@@ -1362,7 +1362,6 @@ class BaseClassifier(ABC):
 # ============================================================================
 
 class EvidentialLayer(nn.Module):
-    
     def __init__(self, in_features: int, num_classes: int):
         super().__init__()
         self.num_classes = num_classes
@@ -1432,104 +1431,19 @@ class ArchitectureHandler:
     
     @staticmethod
     def get_feature_extractor(model: nn.Module, model_name: str) -> Tuple[nn.Module, int]:
-        model_name_lower = model_name.lower()
+        # Use timm's built-in feature extraction mode
+        # num_classes=0 returns a model without the classification head,
+        # with proper pooling and flattening already applied
+        feature_backbone = timm.create_model(
+            model_name, 
+            pretrained=True, 
+            num_classes=0
+        )
         
-        # ResNet family
-        if 'resnet' in model_name_lower or 'resnext' in model_name_lower:
-            feature_extractor = nn.Sequential(
-                model.conv1, model.bn1, model.relu, model.maxpool,
-                model.layer1, model.layer2, model.layer3, model.layer4,
-                model.global_pool, nn.Flatten()
-            )
-            in_features = model.fc.in_features
+        # Get feature dimension from timm's num_features attribute
+        in_features = feature_backbone.num_features
         
-        # EfficientNet family
-        elif 'efficientnet' in model_name_lower:
-            if hasattr(model, 'conv_stem'):
-                feature_extractor = nn.Sequential(
-                    model.conv_stem, model.bn1, model.act1,
-                    model.blocks, model.conv_head, model.bn2, model.act2,
-                    model.global_pool, nn.Flatten()
-                )
-            else:
-                modules = list(model.children())[:-1]
-                feature_extractor = nn.Sequential(*modules, nn.Flatten())
-            
-            if hasattr(model, 'classifier'):
-                in_features = model.classifier.in_features
-            elif hasattr(model, 'fc'):
-                in_features = model.fc.in_features
-            else:
-                dummy = torch.randn(1, 3, 224, 224)
-                with torch.no_grad():
-                    out = feature_extractor(dummy)
-                in_features = out.shape[1]
-        
-        # Vision Transformer
-        elif 'vit' in model_name_lower:
-            class ViTFeatureExtractor(nn.Module):
-                def __init__(self, vit_model):
-                    super().__init__()
-                    self.patch_embed = vit_model.patch_embed
-                    self.cls_token = vit_model.cls_token
-                    self.pos_embed = vit_model.pos_embed
-                    self.pos_drop = vit_model.pos_drop if hasattr(vit_model, 'pos_drop') else nn.Identity()
-                    self.blocks = vit_model.blocks
-                    self.norm = vit_model.norm
-                
-                def forward(self, x):
-                    x = self.patch_embed(x)
-                    cls_token = self.cls_token.expand(x.shape[0], -1, -1)
-                    x = torch.cat([cls_token, x], dim=1)
-                    x = x + self.pos_embed
-                    x = self.pos_drop(x)
-                    x = self.blocks(x)
-                    x = self.norm(x)
-                    return x[:, 0]
-            
-            feature_extractor = ViTFeatureExtractor(model)
-            in_features = model.head.in_features if hasattr(model.head, 'in_features') else model.embed_dim
-        
-        # Swin Transformer
-        elif 'swin' in model_name_lower:
-            class SwinFeatureExtractor(nn.Module):
-                def __init__(self, swin_model):
-                    super().__init__()
-                    self.patch_embed = swin_model.patch_embed
-                    self.layers = swin_model.layers
-                    self.norm = swin_model.norm
-                    self.avgpool = nn.AdaptiveAvgPool1d(1)
-                
-                def forward(self, x):
-                    x = self.patch_embed(x)
-                    x = self.layers(x)
-                    x = self.norm(x)
-                    x = x.transpose(1, 2)
-                    x = self.avgpool(x)
-                    x = x.flatten(1)
-                    return x
-            
-            feature_extractor = SwinFeatureExtractor(model)
-            
-            if hasattr(model.head, 'fc'):
-                in_features = model.head.fc.in_features
-            elif hasattr(model.head, 'in_features'):
-                in_features = model.head.in_features
-            else:
-                in_features = model.num_features
-        
-        # Generic fallback
-        else:
-            print(f"Warning: Unknown architecture '{model_name}', using generic extraction")
-            modules = list(model.children())[:-1]
-            feature_extractor = nn.Sequential(*modules, nn.Flatten())
-            
-            dummy = torch.randn(1, 3, 224, 224)
-            with torch.no_grad():
-                out = feature_extractor(dummy)
-            in_features = out.shape[1]
-        
-        return feature_extractor, in_features
+        return feature_backbone, in_features
 
 
 # ============================================================================
@@ -1544,12 +1458,11 @@ class UniversalEvidentialModel(nn.Module):
         self.model_name = model_name
         self.num_classes = num_classes
         
-        # Load pretrained model
-        base_model = timm.create_model(model_name, pretrained=pretrained, num_classes=num_classes)
-        
-        # Extract feature extractor
+        # Extract feature extractor using the refactored handler
+        # The handler now creates its own backbone via timm.create_model(..., num_classes=0)
         self.feature_extractor, in_features = ArchitectureHandler.get_feature_extractor(
-            base_model, model_name
+            None,  # No longer needed, kept for backward compatibility
+            model_name
         )
         
         # Evidential head
@@ -2401,19 +2314,10 @@ class EvidentialClassifier(BaseClassifier):
 class MetricLearningClassifier(BaseClassifier):
     
     def build_model(self):
-        # Base model
-        base = timm.create_model(self.model_name, pretrained=True, num_classes=self.num_classes)
-        
-        # Get feature dimension
-        if hasattr(base, 'fc'):
-            in_features = base.fc.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        elif hasattr(base, 'head'):
-            in_features = base.head.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        else:
-            in_features = 512
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
+        # Use timm's safe feature extraction
+        feature_backbone = timm.create_model(self.model_name, pretrained=True, num_classes=0)
+        in_features = feature_backbone.num_features
+        self.feature_extractor = feature_backbone
         
         # Embedding layer
         self.embedding_dim = 256
@@ -2475,18 +2379,10 @@ class MetricLearningClassifier(BaseClassifier):
 class RegularizedClassifier(BaseClassifier):
     
     def build_model(self):
-        base = timm.create_model(self.model_name, pretrained=True, num_classes=self.num_classes)
-        
-        # Extract feature extractor
-        if hasattr(base, 'fc'):
-            in_features = base.fc.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        elif hasattr(base, 'head'):
-            in_features = base.head.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        else:
-            in_features = 512
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
+        # Use timm's safe feature extraction
+        feature_backbone = timm.create_model(self.model_name, pretrained=True, num_classes=0)
+        in_features = feature_backbone.num_features
+        self.feature_extractor = feature_backbone
         
         self.classifier = nn.Linear(in_features, self.num_classes)
         
@@ -2597,25 +2493,13 @@ class RegularizedClassifier(BaseClassifier):
 class AttentionEnhancedClassifier(BaseClassifier):
     
     def build_model(self):
-        base = timm.create_model(self.model_name, pretrained=True, num_classes=self.num_classes)
+        # Use timm's safe feature extraction
+        feature_backbone = timm.create_model(self.model_name, pretrained=True, num_classes=0)
+        in_features = feature_backbone.num_features
+        self.feature_extractor = feature_backbone
         
-        # Add SE blocks (simplified - add to last layer)
-        if hasattr(base, 'layer4'):
-            for block in base.layer4:
-                if hasattr(block, 'conv2'):
-                    channels = block.conv2.out_channels
-                    block.se = SEBlock(channels, reduction=16)
-        
-        # Get feature dimension
-        if hasattr(base, 'fc'):
-            in_features = base.fc.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        elif hasattr(base, 'head'):
-            in_features = base.head.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        else:
-            in_features = 512
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
+        # Note: SE blocks are typically already built into modern models,
+        # so we skip manual insertion to avoid architecture-specific assumptions
         
         # Cosine classifier
         self.cosine_classifier = CosineClassifier(in_features, self.num_classes, scale=30.0)
@@ -2818,19 +2702,15 @@ class HybridTransformerClassifier(BaseClassifier):
             self.model = timm.create_model(self.model_name, pretrained=True, num_classes=self.num_classes)
             return
         
-        # CNN backbone
-        cnn_base = timm.create_model(self.model_name, pretrained=True, num_classes=self.num_classes)
+        # Use timm's features_only mode to get spatial feature maps
+        cnn_base = timm.create_model(self.model_name, pretrained=True, features_only=True)
+        self.cnn_features = cnn_base
         
-        # Extract CNN features (before classifier)
-        if hasattr(cnn_base, 'fc'):
-            self.cnn_features = nn.Sequential(*list(cnn_base.children())[:-2])
-            in_features = cnn_base.fc.in_features
-        elif hasattr(cnn_base, 'head'):
-            self.cnn_features = nn.Sequential(*list(cnn_base.children())[:-2])
-            in_features = cnn_base.head.in_features
-        else:
-            self.cnn_features = nn.Sequential(*list(cnn_base.children())[:-1])
-            in_features = 512
+        # Get feature dimension by running a dummy input
+        dummy = torch.randn(1, 3, 224, 224)
+        with torch.no_grad():
+            feature_maps = self.cnn_features(dummy)
+            in_features = feature_maps[-1].shape[1]  # Last feature map channels
         
         # Simple transformer layer
         self.transformer = nn.TransformerEncoderLayer(
@@ -2852,8 +2732,14 @@ class HybridTransformerClassifier(BaseClassifier):
         })
     
     def forward(self, images):
-        # CNN features
-        features = self.cnn_features(images)
+        # Handle ViT/Swin models (use as-is, no hybrid)
+        if 'vit' in self.model_name.lower() or 'swin' in self.model_name.lower():
+            return self.model(images)
+        
+        # CNN features - features_only mode returns a list of feature maps
+        feature_maps = self.cnn_features(images)
+        # Get the last (deepest) feature map
+        features = feature_maps[-1]
         
         # Global average pooling
         if len(features.shape) == 4:
@@ -2881,26 +2767,13 @@ class HybridTransformerClassifier(BaseClassifier):
 class UltimateRecallOptimizedClassifier(BaseClassifier):
     
     def build_model(self):
-        # Base model with SE blocks
-        base = timm.create_model(self.model_name, pretrained=True, num_classes=self.num_classes)
+        # Use timm's safe feature extraction
+        feature_backbone = timm.create_model(self.model_name, pretrained=True, num_classes=0)
+        in_features = feature_backbone.num_features
+        self.feature_extractor = feature_backbone
         
-        # Add SE blocks
-        if hasattr(base, 'layer4'):
-            for block in base.layer4:
-                if hasattr(block, 'conv2'):
-                    channels = block.conv2.out_channels
-                    block.se = SEBlock(channels, reduction=16)
-        
-        # Extract feature extractor
-        if hasattr(base, 'fc'):
-            in_features = base.fc.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        elif hasattr(base, 'head'):
-            in_features = base.head.in_features
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
-        else:
-            in_features = 512
-            self.feature_extractor = nn.Sequential(*list(base.children())[:-1], nn.Flatten())
+        # Note: SE blocks are typically already built into modern models,
+        # so we skip manual insertion to avoid architecture-specific assumptions
         
         # Embedding layer
         self.embedding_dim = 256

@@ -124,9 +124,9 @@ class EvidentialLoss(nn.Module):
 
 class ArchitectureHandler:
     """
-    Extracts feature extractors from any architecture.
+    Extracts feature extractors from any architecture using timm's built-in functionality.
     
-    Supported:
+    This approach is robust and works with ALL timm models:
     - ResNet family (ResNet, ResNeXt, Wide ResNet)
     - EfficientNet family (EfficientNet, EfficientNetV2)
     - Vision Transformers (ViT)
@@ -137,110 +137,32 @@ class ArchitectureHandler:
     @staticmethod
     def get_feature_extractor(model: nn.Module, model_name: str) -> Tuple[nn.Module, int]:
         """
-        Extract feature extractor and feature dimension.
+        Extract feature extractor and feature dimension using timm's num_classes=0 mode.
+        
+        This is the SAFE way to extract features - no manual layer surgery required!
+        timm automatically handles pooling, flattening, and head removal for ANY model.
+        
+        Args:
+            model: The original model (not used, kept for backward compatibility)
+            model_name: Name of the timm model
         
         Returns:
-            feature_extractor: nn.Module that outputs features
-            in_features: int, dimension of features
+            feature_extractor: nn.Module that outputs pooled feature vector [batch, features]
+            in_features: int, dimension of feature vector
         """
-        model_name_lower = model_name.lower()
+        # Use timm's built-in feature extraction mode
+        # num_classes=0 returns a model without the classification head,
+        # with proper pooling and flattening already applied
+        feature_backbone = timm.create_model(
+            model_name, 
+            pretrained=True, 
+            num_classes=0
+        )
         
-        # ResNet family
-        if 'resnet' in model_name_lower or 'resnext' in model_name_lower:
-            feature_extractor = nn.Sequential(
-                model.conv1, model.bn1, model.relu, model.maxpool,
-                model.layer1, model.layer2, model.layer3, model.layer4,
-                model.global_pool, nn.Flatten()
-            )
-            in_features = model.fc.in_features
+        # Get feature dimension from timm's num_features attribute
+        in_features = feature_backbone.num_features
         
-        # EfficientNet family
-        elif 'efficientnet' in model_name_lower:
-            if hasattr(model, 'conv_stem'):
-                feature_extractor = nn.Sequential(
-                    model.conv_stem, model.bn1, model.act1,
-                    model.blocks, model.conv_head, model.bn2, model.act2,
-                    model.global_pool, nn.Flatten()
-                )
-            else:
-                modules = list(model.children())[:-1]
-                feature_extractor = nn.Sequential(*modules, nn.Flatten())
-            
-            if hasattr(model, 'classifier'):
-                in_features = model.classifier.in_features
-            elif hasattr(model, 'fc'):
-                in_features = model.fc.in_features
-            else:
-                dummy = torch.randn(1, 3, 224, 224)
-                with torch.no_grad():
-                    out = feature_extractor(dummy)
-                in_features = out.shape[1]
-        
-        # Vision Transformer
-        elif 'vit' in model_name_lower:
-            class ViTFeatureExtractor(nn.Module):
-                def __init__(self, vit_model):
-                    super().__init__()
-                    self.patch_embed = vit_model.patch_embed
-                    self.cls_token = vit_model.cls_token
-                    self.pos_embed = vit_model.pos_embed
-                    self.pos_drop = vit_model.pos_drop if hasattr(vit_model, 'pos_drop') else nn.Identity()
-                    self.blocks = vit_model.blocks
-                    self.norm = vit_model.norm
-                
-                def forward(self, x):
-                    x = self.patch_embed(x)
-                    cls_token = self.cls_token.expand(x.shape[0], -1, -1)
-                    x = torch.cat([cls_token, x], dim=1)
-                    x = x + self.pos_embed
-                    x = self.pos_drop(x)
-                    x = self.blocks(x)
-                    x = self.norm(x)
-                    return x[:, 0]
-            
-            feature_extractor = ViTFeatureExtractor(model)
-            in_features = model.head.in_features if hasattr(model.head, 'in_features') else model.embed_dim
-        
-        # Swin Transformer
-        elif 'swin' in model_name_lower:
-            class SwinFeatureExtractor(nn.Module):
-                def __init__(self, swin_model):
-                    super().__init__()
-                    self.patch_embed = swin_model.patch_embed
-                    self.layers = swin_model.layers
-                    self.norm = swin_model.norm
-                    self.avgpool = nn.AdaptiveAvgPool1d(1)
-                
-                def forward(self, x):
-                    x = self.patch_embed(x)
-                    x = self.layers(x)
-                    x = self.norm(x)
-                    x = x.transpose(1, 2)
-                    x = self.avgpool(x)
-                    x = x.flatten(1)
-                    return x
-            
-            feature_extractor = SwinFeatureExtractor(model)
-            
-            if hasattr(model.head, 'fc'):
-                in_features = model.head.fc.in_features
-            elif hasattr(model.head, 'in_features'):
-                in_features = model.head.in_features
-            else:
-                in_features = model.num_features
-        
-        # Generic fallback
-        else:
-            print(f"Warning: Unknown architecture '{model_name}', using generic extraction")
-            modules = list(model.children())[:-1]
-            feature_extractor = nn.Sequential(*modules, nn.Flatten())
-            
-            dummy = torch.randn(1, 3, 224, 224)
-            with torch.no_grad():
-                out = feature_extractor(dummy)
-            in_features = out.shape[1]
-        
-        return feature_extractor, in_features
+        return feature_backbone, in_features
 
 
 # ============================================================================
@@ -263,12 +185,11 @@ class UniversalEvidentialModel(nn.Module):
         self.model_name = model_name
         self.num_classes = num_classes
         
-        # Load pretrained model
-        base_model = timm.create_model(model_name, pretrained=pretrained, num_classes=num_classes)
-        
-        # Extract feature extractor
+        # Extract feature extractor using the refactored handler
+        # The handler now creates its own backbone via timm.create_model(..., num_classes=0)
         self.feature_extractor, in_features = ArchitectureHandler.get_feature_extractor(
-            base_model, model_name
+            None,  # No longer needed, kept for backward compatibility
+            model_name
         )
         
         # Evidential head
