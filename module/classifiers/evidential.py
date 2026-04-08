@@ -43,7 +43,7 @@ class EvidentialLayer(nn.Module):
         evidence = F.softplus(self.evidence_layer(x))
         return evidence
     
-    def get_predictions_and_uncertainty(self, evidence: torch.Tensor) -> Tuple[
+    def get_predictions_and_uncertainty(self, evidence: torch.Tensor, class_weights: torch.Tensor = None) -> Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor
     ]:
         """
@@ -59,11 +59,20 @@ class EvidentialLayer(nn.Module):
         
         # Expected probabilities
         S = alpha.sum(dim=1, keepdim=True)
-        probs = alpha / S
-        
-        # Uncertainty (normalized)
         K = self.num_classes
         uncertainty = K / S
+        
+        # Expected probabilities
+        if class_weights is not None:
+            if class_weights.device != evidence.device:
+                class_weights = class_weights.to(evidence.device)
+            # Weighted expected probabilities for recall bias
+            # p_k = (w_k * alpha_k) / sum(w_j * alpha_j)
+            weighted_alpha = alpha * class_weights.view(1, -1)
+            S = weighted_alpha.sum(dim=1, keepdim=True)
+            probs = weighted_alpha / S
+        else:
+            probs = alpha / S
         
         return probs, uncertainty, alpha
 
@@ -81,11 +90,12 @@ class EvidentialLoss(nn.Module):
     2. KL divergence (regularization to prevent overconfidence)
     """
     
-    def __init__(self, num_classes: int, lam: float = 0.5, epsilon: float = 1e-10):
+    def __init__(self, num_classes: int, lam: float = 0.5, epsilon: float = 1e-10, class_weights: torch.Tensor = None):
         super().__init__()
         self.num_classes = num_classes
         self.lam = lam
         self.epsilon = epsilon
+        self.class_weights = class_weights
     
     def forward(self, evidence: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
@@ -105,7 +115,18 @@ class EvidentialLoss(nn.Module):
         # Bayesian risk
         A = torch.sum((target_one_hot - alpha / S) ** 2, dim=1, keepdim=True)
         B = torch.sum(alpha * (S - alpha) / (S * S * (S + 1)), dim=1, keepdim=True)
-        loss_mse = (A + B).mean()
+        
+        # Apply class weights to MSE loss
+        loss_mse = A + B
+        if self.class_weights is not None:
+            if self.class_weights.device != evidence.device:
+                self.class_weights = self.class_weights.to(evidence.device)
+            
+            # Weight per sample based on target class
+            weights = self.class_weights[target].view(-1, 1)
+            loss_mse = loss_mse * weights
+            
+        loss_mse = loss_mse.mean()
         
         # KL divergence regularization
         alpha_tilde = target_one_hot + (1 - target_one_hot) * alpha
@@ -116,53 +137,6 @@ class EvidentialLoss(nn.Module):
         kl_div = kl_div.mean()
         
         return loss_mse + self.lam * kl_div
-
-
-# ============================================================================
-# ARCHITECTURE HANDLER
-# ============================================================================
-
-class ArchitectureHandler:
-    """
-    Extracts feature extractors from any architecture using timm's built-in functionality.
-    
-    This approach is robust and works with ALL timm models:
-    - ResNet family (ResNet, ResNeXt, Wide ResNet)
-    - EfficientNet family (EfficientNet, EfficientNetV2)
-    - Vision Transformers (ViT)
-    - Swin Transformers
-    - MobileNet, DenseNet, ConvNeXt, etc.
-    """
-    
-    @staticmethod
-    def get_feature_extractor(model: nn.Module, model_name: str) -> Tuple[nn.Module, int]:
-        """
-        Extract feature extractor and feature dimension using timm's num_classes=0 mode.
-        
-        This is the SAFE way to extract features - no manual layer surgery required!
-        timm automatically handles pooling, flattening, and head removal for ANY model.
-        
-        Args:
-            model: The original model (not used, kept for backward compatibility)
-            model_name: Name of the timm model
-        
-        Returns:
-            feature_extractor: nn.Module that outputs pooled feature vector [batch, features]
-            in_features: int, dimension of feature vector
-        """
-        # Use timm's built-in feature extraction mode
-        # num_classes=0 returns a model without the classification head,
-        # with proper pooling and flattening already applied
-        feature_backbone = timm.create_model(
-            model_name, 
-            pretrained=True, 
-            num_classes=0
-        )
-        
-        # Get feature dimension from timm's num_features attribute
-        in_features = feature_backbone.num_features
-        
-        return feature_backbone, in_features
 
 
 # ============================================================================
@@ -184,13 +158,9 @@ class UniversalEvidentialModel(nn.Module):
         
         self.model_name = model_name
         self.num_classes = num_classes
-        
-        # Extract feature extractor using the refactored handler
-        # The handler now creates its own backbone via timm.create_model(..., num_classes=0)
-        self.feature_extractor, in_features = ArchitectureHandler.get_feature_extractor(
-            None,  # No longer needed, kept for backward compatibility
-            model_name
-        )
+
+        self.feature_extractor = timm.create_model(self.model_name, pretrained=pretrained, num_classes=0)
+        in_features = self.feature_extractor.num_features
         
         # Evidential head
         self.evidential_head = EvidentialLayer(in_features, num_classes)
@@ -201,8 +171,8 @@ class UniversalEvidentialModel(nn.Module):
         evidence = self.evidential_head(features)
         return evidence
     
-    def get_predictions_and_uncertainty(self, evidence: torch.Tensor) -> Tuple[
+    def get_predictions_and_uncertainty(self, evidence: torch.Tensor, class_weights: torch.Tensor = None) -> Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor
     ]:
         """Convert evidence to predictions and uncertainty."""
-        return self.evidential_head.get_predictions_and_uncertainty(evidence)
+        return self.evidential_head.get_predictions_and_uncertainty(evidence, class_weights)

@@ -1,4 +1,5 @@
 .vscode
+__pycache__/
 Quality_Code/
 Quantity_Code/
 *.csv

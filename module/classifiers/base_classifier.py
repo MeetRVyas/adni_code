@@ -31,12 +31,14 @@ class BaseClassifier(ABC):
     - compute_loss()
     """
     
-    def __init__(self, model_name: str, num_classes: int = 4, device: str = 'cuda', checkpoint_path : str = None):
+    def __init__(self, model_name: str, num_classes: int = 4, device: str = 'cuda',
+                checkpoint_path : str = None, class_weights_tensor : torch.FloatTensor = None):
         self.model_name = model_name
         self.num_classes = num_classes
         self.device = device
         # checkpoint_path: Path to store checkpoints (best model weights)
         self.checkpoint_path = checkpoint_path
+        self.class_weights_tensor = class_weights_tensor
 
         
         # Model (built by subclass)
@@ -73,10 +75,27 @@ class BaseClassifier(ABC):
         """Compute loss from model outputs and labels."""
         pass
     
-    def get_predictions(self, outputs) -> torch.Tensor:
-        """Convert model outputs to class predictions."""
+    def get_predictions(self, outputs, use_weights: bool = False) -> torch.Tensor:
+        """
+        Convert model outputs to class predictions.
+        
+        Args:
+            outputs: Model outputs (logits or tuple)
+            use_weights: If True, uses self.class_weights_tensor to bias predictions
+        """
         if isinstance(outputs, tuple):
             outputs = outputs[0]
+        
+        if use_weights and self.class_weights_tensor is not None:
+            # Bias logits by adding log(weights) to improve recall for high-weight classes
+            # This works because Softmax(x + log(w)) = w * exp(x) / sum(w * exp(x))
+            if self.class_weights_tensor.device != outputs.device:
+                self.class_weights_tensor = self.class_weights_tensor.to(outputs.device)
+            
+            # Use log-weights to bias logits (safe with small epsilon)
+            log_weights = torch.log(self.class_weights_tensor + 1e-10)
+            outputs = outputs + log_weights.view(1, -1)
+            
         return torch.argmax(outputs, dim=1)
     
     def _get_metric_value(self, labels: List, preds: List, metric: str) -> float:
@@ -190,7 +209,7 @@ class BaseClassifier(ABC):
     def fit(self, train_loader, val_loader, epochs: int = 30, 
             lr: float = 1e-4, use_sam: bool = False,
             primary_metric: str = 'recall',
-            patience: int = 10, min_delta: float = 0.001):
+            patience: int = 10, min_delta: float = 0.001, param_groups = None):
         """
         Complete training loop with metric-agnostic optimization.
         
@@ -210,15 +229,19 @@ class BaseClassifier(ABC):
         # Optimizer
         if use_sam:
             from .techniques import SAM
-            optimizer = SAM(self.model.parameters(), optim.AdamW, lr=lr, weight_decay=0.01, rho=0.05)
+            optimizer = SAM(param_groups or self.model.parameters(), optim.AdamW, lr=lr, weight_decay=0.01, rho=0.05)
         else:
-            optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=0.01)
+            optimizer = optim.AdamW(param_groups or self.model.parameters(), lr=lr, weight_decay=0.01)
         
         # Scheduler
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer.base_optimizer if use_sam else optimizer,
-            T_max=epochs,
-            eta_min=1e-7
+            max_lr=lr,
+            epochs=epochs,
+            steps_per_epoch=len(train_loader),
+            pct_start=0.3,
+            div_factor=25.0,
+            final_div_factor=1000.0
         )
         
         # Scaler (only if not SAM)

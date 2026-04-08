@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import gc
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
-from .models import get_model, get_img_size
+from .models import get_model, get_img_size, check_model
 from .utils import *
 from .config import *
 from .visualization import Visualizer
@@ -115,6 +115,10 @@ class Cross_Validator:
                 classifiers_to_be_used = list_classifiers()
             elif isinstance(classifier_type_input, str) :
                 classifiers_to_be_used = [classifier_type_input]
+            elif isinstance(classifier_type_input, (list, tuple)) :
+                classifiers_to_be_used = list(classifier_type_input)
+            else :
+                self.logger.error(f"Classifier type not valid -> {classifier_type_input} ({type(classifier_type_input)})")
             
             for classifier_type in classifiers_to_be_used :
                 self._run_classifier(
@@ -126,13 +130,15 @@ class Cross_Validator:
                     targets=targets,
                     classes=classes,
                     skf=skf,
-                    master_df=master_df
+                    master_df=master_df,
+                    class_weights_tensor = class_weights_tensor
                 )
         
         self.logger.info("\n>>> Batch Complete.")
 
-    def _run_classifier(self, model_name, classifier_type, base_dataset, 
-                       train_val_indices, test_indices, targets, classes, skf, master_df):
+    def _run_classifier(self, model_name, classifier_type, base_dataset,
+                       train_val_indices, test_indices, targets, classes, skf,
+                       master_df, class_weights_tensor):
         """
         Unified training method for ALL classifier types.
         
@@ -166,7 +172,13 @@ class Cross_Validator:
                 self.logger.info(existing.to_string())
                 self.logger.info("="*80)
                 return
-
+        
+        if check_model(model_name = model_name) :
+            self.logger.info(f"Timm supports the model {model_name}")
+        else :
+            self.logger.error(f"Timm does not support the model {model_name}")
+            return
+        
         # Get image size and transforms
         img_size = get_img_size(model_name)
         self.logger.debug(f"Image size for {model_name}: {img_size}")
@@ -218,7 +230,9 @@ class Cross_Validator:
             classifier : BaseClassifier = classifier_class(
                 model_name=model_name,
                 num_classes=len(classes),
-                device=DEVICE
+                device=DEVICE,
+                checkpoint_path = checkpoint_path,
+                class_weights_tensor = class_weights_tensor
             )
             
             self.logger.info(f"  Training {classifier_type} classifier...")
@@ -236,7 +250,6 @@ class Cross_Validator:
                 primary_metric=OPTIMIZE_METRIC,
                 patience=PATIENCE,
                 min_delta=MIN_DELTA_METRIC,
-                checkpoint_path = checkpoint_path
             )
             training_histoy.append(history)
             

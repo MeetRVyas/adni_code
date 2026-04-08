@@ -25,16 +25,25 @@ class FocalLoss(nn.Module):
     From: "Focal Loss for Dense Object Detection" (Lin et al., 2017)
     """
     
-    def __init__(self, alpha=1.0, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=1.0, gamma=2.0, reduction='mean', weights=None):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.weights = weights
     
     def forward(self, inputs, targets):
         ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
         p_t = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1 - p_t) ** self.gamma * ce_loss
+        
+        if self.weights is not None:
+             if self.weights.device != inputs.device:
+                self.weights = self.weights.to(inputs.device)
+             
+             # Apply class weights
+             weight_per_sample = self.weights[targets]
+             focal_loss = focal_loss * weight_per_sample
         
         if self.reduction == 'mean':
             return focal_loss.mean()
@@ -54,13 +63,17 @@ class ArchitectureLayerGroups:
     @staticmethod
     def get_resnet_groups(model):
         """ResNet family layer groups."""
-        return [
+        groups = [
             list(model.conv1.parameters()) + list(model.bn1.parameters()) + list(model.layer1.parameters()),
             list(model.layer2.parameters()),
             list(model.layer3.parameters()),
             list(model.layer4.parameters()),
-            list(model.fc.parameters())
         ]
+        if hasattr(model, 'fc'):
+            groups.append(list(model.fc.parameters()))
+        else :
+            groups.append([])
+        return groups
     
     @staticmethod
     def get_vit_groups(model):
@@ -115,68 +128,149 @@ class ArchitectureLayerGroups:
     @staticmethod
     def get_swin_groups(model):
         """Swin Transformer layer groups."""
-        groups = []
+        # We initialize 5 groups as per your original logic
+        groups = [[] for _ in range(5)]
         
-        # Group 0: Patch embed + Stage 1
-        group0 = []
-        if hasattr(model, 'patch_embed'):
-            group0.extend(list(model.patch_embed.parameters()))
-        if hasattr(model, 'layers') and len(model.layers) > 0:
-            group0.extend(list(model.layers[0].parameters()))
-        groups.append(group0)
+        # We use a set to track parameter IDs to ensure 100% coverage
+        param_ids = set()
         
-        # Groups 1-3: Stages 2-4
-        if hasattr(model, 'layers'):
-            for i in range(1, min(4, len(model.layers))):
-                groups.append(list(model.layers[i].parameters()))
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+                
+            # --- Logic matching your original context ---
             
-            # Pad if needed
-            while len(groups) < 4:
-                groups.append([])
-            
-            # Add norm to last group
-            if hasattr(model, 'norm'):
-                groups[3].extend(list(model.norm.parameters()))
-        else:
-            groups.extend([[], [], []])
-        
-        # Group 4: Head
-        group4 = []
-        if hasattr(model, 'head'):
-            if hasattr(model.head, 'fc'):
-                group4.extend(list(model.head.fc.parameters()))
+            # Group 4: Head
+            # timm swin models name the classifier "head"
+            if name.startswith('head.'):
+                groups[4].append(param)
+                
+            # Group 0: Patch Embed (Stem)
+            elif name.startswith('patch_embed.') or name.startswith('absolute_pos_embed'):
+                groups[0].append(param)
+                
+            # Layers (Stages 1-4)
+            elif name.startswith('layers.'):
+                # name format is "layers.X.blocks..."
+                # We parse X to determine the group
+                try:
+                    # Extract the layer index (0, 1, 2, or 3)
+                    layer_idx = int(name.split('.')[1])
+                    
+                    if layer_idx == 0:
+                        # Context: Group 0 includes Stage 1
+                        groups[0].append(param)
+                    elif layer_idx == 1:
+                        # Context: Group 1 is Stage 2
+                        groups[1].append(param)
+                    elif layer_idx == 2:
+                        # Context: Group 2 is Stage 3
+                        groups[2].append(param)
+                    elif layer_idx == 3:
+                        # Context: Group 3 is Stage 4
+                        groups[3].append(param)
+                    else:
+                        # Fallback: If model has >4 stages (rare), put in Group 3
+                        groups[3].append(param)
+                        
+                except (IndexError, ValueError):
+                    # Fallback: If parsing fails, put in Group 0 (safest default)
+                    print(f"Warning: Could not parse layer index for {name}. Assigning to Group 0.")
+                    groups[0].append(param)
+    
+            # Group 3: Final Norm
+            # Context: Your code put model.norm in Group 3
+            elif name.startswith('norm.'):
+                groups[3].append(param)
+                
+            # Catch-all
             else:
-                group4.extend(list(model.head.parameters()))
-        elif hasattr(model, 'fc'):
-            group4.extend(list(model.fc.parameters()))
-        groups.append(group4)
-        
+                print(f"Warning: Unknown parameter found: '{name}'. Assigning to Group 0.")
+                groups[0].append(param)
+            
+            # Track ID
+            param_ids.add(id(param))
+    
+        # --- Robustness Check ---
+        # Ensure every single trainable parameter was assigned to a group
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        if len(param_ids) != len(trainable_params):
+            raise RuntimeError(
+                f"Grouping Error: Model has {len(trainable_params)} trainable params, "
+                f"but function only grouped {len(param_ids)}. "
+                "Check for frozen layers or shared parameters."
+        )
+
+        for i, group in enumerate(groups) :
+            print(f"Group {i} -> {len(group)}")
+    
         return groups
     
     @staticmethod
     def get_efficientnet_groups(model):
-        """EfficientNet layer groups."""
-        children = list(model.children())
-        n_children = len(children)
-        n_per_group = max(1, n_children // 5)
+        """
+        EfficientNet layer groups.
+        Drills into model.blocks for balanced parameter distribution.
+        """
+        # Initialize 5 parameter groups
+        groups = [[], [], [], [], []]
         
-        groups = []
-        for i in range(4):
-            start = i * n_per_group
-            end = (i + 1) * n_per_group if i < 3 else n_children - 1
-            group_params = []
-            for child in children[start:end]:
-                if hasattr(child, 'parameters'):
-                    group_params.extend(list(child.parameters()))
-            groups.append(group_params)
+        # Helper to safely add parameters from a module
+        def append_params(group_idx, module):
+            if module is not None:
+                groups[group_idx].extend(list(module.parameters()))
+    
+        # --- 1. STEM & EARLY ENTRY (Group 0) ---
+        # The Stem and BN1 handle the raw image input.
+        if hasattr(model, 'conv_stem'): append_params(0, model.conv_stem)
+        if hasattr(model, 'bn1'):       append_params(0, model.bn1)
+    
+        # --- 2. BACKBONE BLOCKS (Groups 0, 1, 2, 3) ---
+        if hasattr(model, 'blocks'):
+            # Flatten the blocks if they are nested Sequential (common in timm)
+            all_stages = list(model.blocks.children())
+            total_stages = len(all_stages)
+            
+            for i, stage in enumerate(all_stages):
+                # EfficientNet B4 typically has 7 stages (indices 0 to 6)
+                # We map these stages to groups to maintain semantic gradient.
+                
+                if i == 0:
+                    # Stage 0 is usually stride 1, keeping high resolution.
+                    # It contextually belongs with the Stem.
+                    append_params(0, stage)
+                
+                elif i <= 2:
+                    # Stages 1 & 2: First significant downsampling.
+                    append_params(1, stage)
+                    
+                elif i <= 4:
+                    # Stages 3 & 4: The "Body" of the network.
+                    append_params(2, stage)
+                    
+                else:
+                    # Stages 5 & 6+: The Deepest features. 
+                    # These are the most complex semantic features before the head.
+                    append_params(3, stage)
+    
+        # --- 3. THE HEAD (Group 4) ---
+        # This is the "Adapter". In Transfer Learning, we want the 
+        # feature projection (conv_head) AND the classifier to learn fastest.
         
-        # Last group (classifier)
-        group4 = []
-        for child in children[4*n_per_group:]:
-            if hasattr(child, 'parameters'):
-                group4.extend(list(child.parameters()))
-        groups.append(group4)
+        # The Conv Head projects features to the final channel dimension
+        if hasattr(model, 'conv_head'): append_params(4, model.conv_head)
+        if hasattr(model, 'bn2'):       append_params(4, model.bn2)
         
+        # The Global Pooling is parameter-less, so we skip to Classifier
+        if hasattr(model, 'global_pool'): pass 
+        
+        # The Classifier (Linear Layer)
+        if hasattr(model, 'classifier'): append_params(4, model.classifier)
+        elif hasattr(model, 'fc'):       append_params(4, model.fc) # Legacy fallback
+
+        for i, group in enumerate(groups) :
+            print(f"Group {i} -> {len(group)}")
+    
         return groups
     
     @staticmethod
@@ -272,7 +366,7 @@ class ProgressiveClassifier(BaseClassifier):
     def compute_loss(self, outputs, labels):
         """Focal Loss for hard examples."""
         if not hasattr(self, 'focal_loss'):
-            self.focal_loss = FocalLoss(alpha=1.0, gamma=2.0).to(self.device)
+            self.focal_loss = FocalLoss(alpha=1.0, gamma=2.0, weights=self.class_weights_tensor).to(self.device)
         return self.focal_loss(outputs, labels)
     
     def _get_discriminative_params(self, base_lr):
@@ -299,7 +393,7 @@ class ProgressiveClassifier(BaseClassifier):
         return param_groups
     
     def fit(self, train_loader, val_loader, epochs=30, lr=1e-4,
-            use_sam=False, primary_metric='recall',
+            use_sam=True, primary_metric='recall',
             patience=10, min_delta=0.001):
         """
         3-phase progressive fine-tuning.
@@ -393,12 +487,12 @@ class ProgressiveClassifier(BaseClassifier):
                     
         elif freeze_mode == 'top_50':
             # Unfreeze top 50%
-            all_params = list(self.model.parameters())
-            n_params = len(all_params)
-            for param in all_params[:n_params//2]:
+            for param in self.model.parameters() :
                 param.requires_grad = False
-            for param in all_params[n_params//2:]:
-                param.requires_grad = True
+            top_groups = self.layer_groups[2:]  # Groups 2, 3, 4
+            for group in top_groups:
+                for param in group:
+                    param.requires_grad = True
                 
         elif freeze_mode == 'all_discriminative':
             # Unfreeze everything
@@ -423,9 +517,12 @@ class ProgressiveClassifier(BaseClassifier):
         
         # Create scheduler
         if self.architecture_type == 'cnn':
+            lr_multipliers = [1/100, 1/10, 1/3, 1.0, 10.0]
+            max_lr = [lr * m for m in lr_multipliers[:len(param_groups)]]
+
             scheduler = optim.lr_scheduler.OneCycleLR(
                 optimizer.base_optimizer if use_sam else optimizer,
-                max_lr=lr if freeze_mode != 'all_discriminative' else lr * 10,  # Max LR for classifier
+                max_lr=max_lr if freeze_mode != 'all_discriminative' else lr * 10,  # Max LR for classifier
                 epochs=epochs,
                 steps_per_epoch=len(train_loader),
                 pct_start=0.3,
@@ -433,10 +530,11 @@ class ProgressiveClassifier(BaseClassifier):
                 final_div_factor=1000.0
             )
         else:  # transformer
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 optimizer.base_optimizer if use_sam else optimizer,
-                T_max=epochs,
-                eta_min=1e-7
+                T_0 = (epochs // 7) + 1,
+                T_mult = 2,
+                eta_min = 1e-7
             )
         
         # Scaler

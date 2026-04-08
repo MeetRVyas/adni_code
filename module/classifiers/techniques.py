@@ -95,11 +95,12 @@ class CenterLoss(nn.Module):
     Expected: +4-6% accuracy, tight class clusters
     """
     
-    def __init__(self, num_classes: int, embedding_dim: int, lambda_c: float = 1.0):
+    def __init__(self, num_classes: int, embedding_dim: int, lambda_c: float = 1.0, weights: torch.Tensor = None):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
         self.lambda_c = lambda_c
+        self.weights = weights
         
         # Learnable class centers
         self.centers = nn.Parameter(torch.randn(num_classes, embedding_dim))
@@ -113,9 +114,22 @@ class CenterLoss(nn.Module):
         Returns:
             loss: Center loss
         """
+        self.centers.to(labels.device)
         centers_batch = self.centers[labels]
-        loss = F.mse_loss(embeddings, centers_batch)
-        return self.lambda_c * loss
+        loss = F.mse_loss(embeddings, centers_batch, reduction='none')
+        
+        # Mean across embedding dimension
+        loss = loss.mean(dim=1)
+        
+        if self.weights is not None:
+             if self.weights.device != embeddings.device:
+                self.weights = self.weights.to(embeddings.device)
+             
+             # Apply class weights
+             weight_per_sample = self.weights[labels]
+             loss = loss * weight_per_sample
+        
+        return self.lambda_c * loss.mean()
 
 
 # ============================================================================
@@ -166,7 +180,7 @@ def create_triplet_batch(embeddings: torch.Tensor, labels: torch.Tensor) -> Tupl
         # Positive: same class, different sample
         positive_mask = (labels == label) & (torch.arange(len(labels), device=labels.device) != i)
         if positive_mask.sum() > 0:
-            positive_idx = torch.where(positive_mask)[0][torch.randint(positive_mask.sum(), (1,))].item()
+            positive_idx = torch.where(positive_mask)[0][torch.randint(int(positive_mask.sum()), (1,))].item()
             positive = embeddings[positive_idx]
         else:
             continue
@@ -297,6 +311,7 @@ class SEBlock(nn.Module):
     
     Research: "Squeeze-and-Excitation Networks" (CVPR 2018, won ImageNet)
     Expected: +3-4% accuracy
+    Supports both 4D (spatial) and 2D (flattened) inputs.
     """
     
     def __init__(self, channels: int, reduction: int = 16):
@@ -312,21 +327,31 @@ class SEBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: [batch, channels, height, width]
+            x: [batch, channels, height, width] OR [batch, channels]
         
         Returns:
-            x_scaled: [batch, channels, height, width] with channel attention
+            x_scaled: Same shape as input
         """
-        batch, channels, _, _ = x.size()
-        
-        # Squeeze: Global information embedding
-        y = self.squeeze(x).view(batch, channels)
+        # Handle both 4D (spatial) and 2D (flat) inputs
+        if x.dim() == 4:
+            batch, channels, _, _ = x.size()
+            # Squeeze: Global information embedding
+            self.squeeze.to(x.device)
+            y = self.squeeze(x).view(batch, channels)
+        else:
+            batch, channels = x.size()
+            y = x
         
         # Excitation: Channel attention
-        y = self.excitation(y).view(batch, channels, 1, 1)
+        self.excitation.to(x.device)
+        y = self.excitation(y) # [batch, channels]
         
         # Scale
-        return x * y.expand_as(x)
+        if x.dim() == 4:
+            y = y.view(batch, channels, 1, 1)
+            return x * y.expand_as(x)
+        else:
+            return x * y
 
 
 # ============================================================================
@@ -341,11 +366,12 @@ class DistanceAwareLabelSmoothing(nn.Module):
     Expected: +2-3% accuracy on ordinal problems
     """
     
-    def __init__(self, num_classes: int, smoothing: float = 0.1):
+    def __init__(self, num_classes: int, smoothing: float = 0.1, weights: torch.Tensor = None):
         super().__init__()
         self.num_classes = num_classes
         self.smoothing = smoothing
         self.confidence = 1.0 - smoothing
+        self.weights = weights
     
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -386,9 +412,15 @@ class DistanceAwareLabelSmoothing(nn.Module):
                     smooth_labels[i, k] = remaining * (weight / total_weight)
         
         # KL divergence loss
-        loss = -(smooth_labels * log_probs).sum(dim=1).mean()
+        loss = -(smooth_labels * log_probs).sum(dim=1)
         
-        return loss
+        if self.weights is not None:
+            if self.weights.device != logits.device:
+                self.weights = self.weights.to(logits.device)
+            weight_per_sample = self.weights[targets]
+            loss = loss * weight_per_sample
+            
+        return loss.mean()
 
 
 # ============================================================================

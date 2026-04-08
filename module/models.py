@@ -68,3 +68,6 @@ def get_model(model_name, num_classes, pretrained=True):
     except Exception as e:
         print(f"Error loading model '{model_name}': {e}")
         raise e
+
+def check_model(model_name) :
+    return timm.is_model(model_name = model_name)

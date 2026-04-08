@@ -54,7 +54,7 @@ class BaselineClassifier(BaseClassifier):
         return self.model(images)
     
     def compute_loss(self, outputs, labels):
-        return F.cross_entropy(outputs, labels)
+        return F.cross_entropy(outputs, labels, weight=self.class_weights_tensor)
 
 
 # ============================================================================
@@ -74,11 +74,10 @@ class EvidentialClassifier(BaseClassifier):
     def build_model(self):
         self.evidential_model = UniversalEvidentialModel(
             self.model_name,
-            num_classes=self.num_classes,
-            pretrained=True
+            num_classes=self.num_classes
         )
         self.model = self.evidential_model
-        self.criterion = EvidentialLoss(self.num_classes, lam=0.5)
+        self.criterion = EvidentialLoss(self.num_classes, lam=0.5, class_weights=self.class_weights_tensor)
     
     def forward(self, images):
         return self.evidential_model(images)
@@ -87,7 +86,7 @@ class EvidentialClassifier(BaseClassifier):
         return self.criterion(evidence, labels)
     
     def get_predictions(self, evidence):
-        probs, _, _ = self.evidential_model.get_predictions_and_uncertainty(evidence)
+        probs, _, _ = self.evidential_model.get_predictions_and_uncertainty(evidence, self.class_weights_tensor)
         return torch.argmax(probs, dim=1)
 
 
@@ -122,8 +121,8 @@ class MetricLearningClassifier(BaseClassifier):
         self.classifier = nn.Linear(self.embedding_dim, self.num_classes)
         
         # Losses
-        self.ce_loss = nn.CrossEntropyLoss()
-        self.center_loss = CenterLoss(self.num_classes, self.embedding_dim, lambda_c=0.1)
+        self.ce_loss = nn.CrossEntropyLoss(weight=self.class_weights_tensor)
+        self.center_loss = CenterLoss(self.num_classes, self.embedding_dim, lambda_c=0.1, weights=self.class_weights_tensor)
         self.triplet_loss = TripletLoss(margin=1.0)
         
         # Combined model
@@ -186,7 +185,7 @@ class RegularizedClassifier(BaseClassifier):
         
         # Regularizers
         self.manifold_mixup = ManifoldMixup(alpha=0.2)
-        self.criterion = DistanceAwareLabelSmoothing(self.num_classes, smoothing=0.1)
+        self.criterion = DistanceAwareLabelSmoothing(self.num_classes, smoothing=0.1, weights=self.class_weights_tensor)
         
         self.model = nn.ModuleDict({
             'feature_extractor': self.feature_extractor,
@@ -199,7 +198,7 @@ class RegularizedClassifier(BaseClassifier):
         features = self.feature_extractor(images)
         
         # Apply manifold mixup during training
-        if self.training and self.mixup_enabled and labels is not None:
+        if self.model.training and self.mixup_enabled and labels is not None:
             features, labels_a, labels_b, lam = self.manifold_mixup(features, labels)
             logits = self.classifier(features)
             return logits, labels_a, labels_b, lam
@@ -321,7 +320,7 @@ class AttentionEnhancedClassifier(BaseClassifier):
         return logits
     
     def compute_loss(self, outputs, labels):
-        return F.cross_entropy(outputs, labels)
+        return F.cross_entropy(outputs, labels, weight=self.class_weights_tensor)
 
 
 # ============================================================================
@@ -340,13 +339,26 @@ class ProgressiveEvidentialClassifier(BaseClassifier):
     """
     
     def build_model(self):
+        from module.classifiers.progressive_classifier import ArchitectureLayerGroups
+        
         self.evidential_model = UniversalEvidentialModel(
             self.model_name,
-            num_classes=self.num_classes,
-            pretrained=True
+            num_classes=self.num_classes
         )
         self.model = self.evidential_model
-        self.criterion = EvidentialLoss(self.num_classes, lam=0.5)
+
+        # Get layer groups for discriminative LRs
+        self.layer_groups = ArchitectureLayerGroups.get_layer_groups(
+            self.model.feature_extractor, self.model_name
+        )
+        self.layer_groups[-1].extend(list(self.model.evidential_head.parameters()))
+
+        # Detect architecture type for scheduler selection
+        self.architecture_type = 'transformer' if any(
+            x in self.model_name.lower() for x in ['vit', 'swin', 'transformer']
+        ) else 'cnn'
+
+        self.criterion = EvidentialLoss(self.num_classes, lam=0.5, class_weights=self.class_weights_tensor)
     
     def forward(self, images):
         return self.evidential_model(images)
@@ -355,8 +367,31 @@ class ProgressiveEvidentialClassifier(BaseClassifier):
         return self.criterion(evidence, labels)
     
     def get_predictions(self, evidence):
-        probs, _, _ = self.evidential_model.get_predictions_and_uncertainty(evidence)
+        probs, _, _ = self.evidential_model.get_predictions_and_uncertainty(evidence, self.class_weights_tensor)
         return torch.argmax(probs, dim=1)
+    
+    def _get_discriminative_params(self, base_lr):
+        """
+        Create parameter groups with discriminative learning rates.
+        
+        LR multipliers:
+        - Group 0 (early): base_lr / 100
+        - Group 1 (mid-early): base_lr / 10
+        - Group 2 (mid-late): base_lr / 3
+        - Group 3 (late): base_lr
+        - Group 4 (classifier): base_lr * 10
+        """
+        lr_multipliers = [1/100, 1/10, 1/3, 1.0, 10.0]
+        
+        param_groups = []
+        for params, mult in zip(self.layer_groups, lr_multipliers):
+            if params:
+                param_groups.append({
+                    'params': params,
+                    'lr': base_lr * mult
+                })
+        
+        return param_groups
     
     def fit(self, train_loader, val_loader, epochs: int = 30, lr: float = 1e-4,
             use_sam: bool = False, primary_metric: str = 'recall',
@@ -364,7 +399,8 @@ class ProgressiveEvidentialClassifier(BaseClassifier):
         """
         Progressive training:
         - Phase 1 (5 epochs): Classifier only
-        - Phase 2 (25 epochs): All layers with discriminative LRs
+        - Phase 2 (10 epochs): Top - half layers training
+        - Phase 3 (15 epochs): All layers training
         """
         print(f"\n{'='*80}")
         print(f"PROGRESSIVE EVIDENTIAL TRAINING")
@@ -377,17 +413,42 @@ class ProgressiveEvidentialClassifier(BaseClassifier):
         for param in self.model.evidential_head.parameters():
             param.requires_grad = True
         
-        super().fit(train_loader, val_loader, epochs=5, lr=lr*10, use_sam=False,
-                   primary_metric=primary_metric, patience=5, min_delta=min_delta)
+        super().fit(train_loader, val_loader, epochs=min(5, epochs), lr=lr*10, use_sam=False,
+                   primary_metric=primary_metric, patience=5, min_delta=min_delta, param_groups = self.model.evidential_head.parameters())
         
-        # Phase 2: All layers
-        print("\nPhase 2: Fine-tuning All Layers (remaining epochs)")
-        for param in self.model.parameters():
-            param.requires_grad = True
+        # Phase 2: Top 50
+        remaining_epochs = max(0, epochs - 5)
+        if remaining_epochs > 0:
+            try :
+                print("\nPhase 2: Fine-tuning top half Layers (remaining epochs)")
+                for param in self.model.parameters() :
+                    param.requires_grad = False
+                top_groups = self.layer_groups[2:]  # Groups 2, 3, 4
+                for group in top_groups:
+                    for param in group:
+                        param.requires_grad = True
+                
+                param_groups = filter(lambda p: p.requires_grad, self.model.parameters())
+
+                super().fit(train_loader, val_loader, epochs=min(10, remaining_epochs), lr=lr, use_sam=use_sam,
+                        primary_metric=primary_metric, patience=patience, min_delta=min_delta, param_groups = param_groups)
+            except Exception as e :
+                print(f"Error in Progressive Evidential model phase 2 fit() -> {e}")
         
-        remaining_epochs = epochs - 5
-        super().fit(train_loader, val_loader, epochs=remaining_epochs, lr=lr, use_sam=use_sam,
-                   primary_metric=primary_metric, patience=patience, min_delta=min_delta)
+        # Phase 3: All layers
+        remaining_epochs = max(0, epochs - 15)
+        if remaining_epochs > 0:
+            print("\nPhase 3: Fine-tuning All Layers (remaining epochs)")
+            for param in self.model.parameters():
+                param.requires_grad = True
+            
+            param_groups = self._get_discriminative_params(lr)
+            print(f"Discriminative LR groups:")
+            for i, group in enumerate(param_groups):
+                print(f"  Group {i}: {len(list(group['params']))} params, LR={group['lr']:.2e}")
+            
+            super().fit(train_loader, val_loader, epochs=remaining_epochs, lr=lr, use_sam=use_sam,
+                    primary_metric=primary_metric, patience=patience, min_delta=min_delta, param_groups = param_groups)
         
         return self.history
 
@@ -408,8 +469,7 @@ class ClinicalGradeClassifier(BaseClassifier):
     def build_model(self):
         self.evidential_model = UniversalEvidentialModel(
             self.model_name,
-            num_classes=self.num_classes,
-            pretrained=True
+            num_classes=self.num_classes
         )
         
         # Center loss
@@ -419,8 +479,14 @@ class ClinicalGradeClassifier(BaseClassifier):
         # Manifold mixup
         self.manifold_mixup = ManifoldMixup(alpha=0.2)
         
+        # SE Block for feature refinement
+        # We need to access the input features of the evidential head
+        in_features = self.evidential_model.evidential_head.evidence_layer.in_features
+        self.se_block = SEBlock(in_features)
+        
         # Losses
-        self.evidential_loss = EvidentialLoss(self.num_classes, lam=0.5)
+        self.evidential_loss = EvidentialLoss(self.num_classes, lam=0.5, class_weights=self.class_weights_tensor)
+        self.center_loss = CenterLoss(self.num_classes, embedding_dim, lambda_c=0.1, weights=self.class_weights_tensor)
         
         self.model = self.evidential_model
         self.mixup_enabled = True
@@ -428,8 +494,11 @@ class ClinicalGradeClassifier(BaseClassifier):
     def forward(self, images, labels=None):
         features = self.evidential_model.feature_extractor(images)
         
+        # Apply SE Attention
+        features = self.se_block(features)
+        
         # Apply manifold mixup during training
-        if self.training and self.mixup_enabled and labels is not None:
+        if self.model.training and self.mixup_enabled and labels is not None:
             features, labels_a, labels_b, lam = self.manifold_mixup(features, labels)
             evidence = self.evidential_model.evidential_head(features)
             return evidence, features, labels_a, labels_b, lam
@@ -455,7 +524,7 @@ class ClinicalGradeClassifier(BaseClassifier):
         else:
             evidence = outputs
         
-        probs, _, _ = self.evidential_model.get_predictions_and_uncertainty(evidence)
+        probs, _, _ = self.evidential_model.get_predictions_and_uncertainty(evidence, self.class_weights_tensor)
         return torch.argmax(probs, dim=1)
     
     def fit(self, train_loader, val_loader, epochs: int = 30, lr: float = 1e-4,
@@ -597,7 +666,7 @@ class HybridTransformerClassifier(BaseClassifier):
         return logits
     
     def compute_loss(self, outputs, labels):
-        return F.cross_entropy(outputs, labels)
+        return F.cross_entropy(outputs, labels, weight=self.class_weights_tensor)
 
 
 # ============================================================================
@@ -631,6 +700,8 @@ class UltimateRecallOptimizedClassifier(BaseClassifier):
         
         # Embedding layer
         self.embedding_dim = 256
+        self.se_block = SEBlock(in_features)
+
         self.embedding = nn.Sequential(
             nn.Linear(in_features, self.embedding_dim),
             nn.BatchNorm1d(self.embedding_dim),
@@ -644,8 +715,8 @@ class UltimateRecallOptimizedClassifier(BaseClassifier):
         self.cosine_classifier = CosineClassifier(self.embedding_dim, self.num_classes, scale=30.0)
         
         # Losses
-        self.evidential_loss = EvidentialLoss(self.num_classes, lam=0.5)
-        self.center_loss = CenterLoss(self.num_classes, self.embedding_dim, lambda_c=0.1)
+        self.evidential_loss = EvidentialLoss(self.num_classes, lam=0.5, class_weights=self.class_weights_tensor)
+        self.center_loss = CenterLoss(self.num_classes, self.embedding_dim, lambda_c=0.1, weights=self.class_weights_tensor)
         
         # Regularizers
         self.manifold_mixup = ManifoldMixup(alpha=0.2)
@@ -664,10 +735,11 @@ class UltimateRecallOptimizedClassifier(BaseClassifier):
     def forward(self, images, labels=None):
         # Features
         features = self.feature_extractor(images)
+        features = self.se_block(features)
         embeddings = self.embedding(features)
         
         # Apply manifold mixup during training
-        if self.training and self.mixup_enabled and labels is not None:
+        if self.model.training and self.mixup_enabled and labels is not None:
             embeddings, labels_a, labels_b, lam = self.manifold_mixup(embeddings, labels)
             
             if self.use_evidential:
@@ -692,8 +764,8 @@ class UltimateRecallOptimizedClassifier(BaseClassifier):
                 loss_pred = lam * self.evidential_loss(pred, labels_a) + \
                            (1 - lam) * self.evidential_loss(pred, labels_b)
             else:
-                loss_pred = lam * F.cross_entropy(pred, labels_a) + \
-                           (1 - lam) * F.cross_entropy(pred, labels_b)
+                loss_pred = lam * F.cross_entropy(pred, labels_a, weight=self.class_weights_tensor) + \
+                           (1 - lam) * F.cross_entropy(pred, labels_b, weight=self.class_weights_tensor)
             
             loss_center = self.center_loss(embeddings, labels)
         else:
@@ -702,7 +774,7 @@ class UltimateRecallOptimizedClassifier(BaseClassifier):
             if self.use_evidential:
                 loss_pred = self.evidential_loss(pred, labels)
             else:
-                loss_pred = F.cross_entropy(pred, labels)
+                loss_pred = F.cross_entropy(pred, labels, weight=self.class_weights_tensor)
             
             loss_center = self.center_loss(embeddings, labels)
         
@@ -715,9 +787,7 @@ class UltimateRecallOptimizedClassifier(BaseClassifier):
             pred = outputs
         
         if self.use_evidential:
-            alpha = pred + 1
-            S = alpha.sum(dim=1, keepdim=True)
-            probs = alpha / S
+            probs, _, _ = self.evidential_head.get_predictions_and_uncertainty(pred, self.class_weights_tensor)
             return torch.argmax(probs, dim=1)
         else:
             return torch.argmax(pred, dim=1)

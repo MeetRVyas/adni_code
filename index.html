@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NeuroScan — Alzheimer MRI Classifier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0a0c10;
+    --surface:   #111318;
+    --border:    #1e2230;
+    --accent:    #4fffb0;
+    --accent2:   #00c8ff;
+    --danger:    #ff4f6b;
+    --text:      #e8ecf5;
+    --muted:     #6b7592;
+    --radius:    12px;
+    --mono:      'Space Mono', monospace;
+    --sans:      'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  /* ── Animated grid background ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(79,255,176,.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(79,255,176,.04) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  header {
+    width: 100%; max-width: 820px;
+    padding: 48px 24px 0;
+    position: relative; z-index: 1;
+  }
+
+  .logo-row {
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 8px;
+  }
+
+  .logo-icon {
+    width: 44px; height: 44px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 10px;
+    display: grid; place-items: center;
+    font-size: 22px;
+  }
+
+  h1 {
+    font-size: 2rem; font-weight: 800; letter-spacing: -0.5px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    font-family: var(--mono);
+    font-size: .75rem;
+    color: var(--muted);
+    letter-spacing: .08em;
+    margin-bottom: 40px;
+  }
+
+  /* ── Main card ── */
+  main {
+    width: 100%; max-width: 820px;
+    padding: 0 24px 60px;
+    position: relative; z-index: 1;
+    display: flex; flex-direction: column; gap: 20px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px;
+  }
+
+  /* ── Drop zone ── */
+  #dropzone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 56px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+    position: relative;
+  }
+  #dropzone.drag-over,
+  #dropzone:hover {
+    border-color: var(--accent);
+    background: rgba(79,255,176,.04);
+  }
+  #dropzone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .dz-icon { font-size: 2.5rem; margin-bottom: 14px; }
+  .dz-primary { font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; }
+  .dz-secondary { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+
+  /* ── Previews ── */
+  #preview-area {
+    display: none; gap: 10px; flex-wrap: wrap;
+    margin-top: 18px;
+  }
+  #preview-area.visible { display: flex; }
+  .thumb {
+    width: 72px; height: 72px;
+    border-radius: 8px; overflow: hidden;
+    border: 1px solid var(--border);
+    position: relative;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .thumb .rm {
+    position: absolute; top: 2px; right: 2px;
+    background: rgba(255,79,107,.85); color:#fff;
+    border: none; border-radius: 50%; width: 18px; height: 18px;
+    font-size: 11px; cursor: pointer; display: grid; place-items: center;
+  }
+  .more-badge {
+    width: 72px; height: 72px; border-radius: 8px;
+    background: var(--border); display: grid; place-items: center;
+    font-family: var(--mono); font-size: .8rem; color: var(--muted);
+  }
+
+  /* ── Mode & controls ── */
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+  .mode-label { font-family: var(--mono); font-size: .72rem; color: var(--muted); white-space: nowrap; }
+
+  .toggle-group { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .toggle-group input[type=radio] { display: none; }
+  .toggle-group label {
+    padding: 8px 16px;
+    font-family: var(--mono); font-size: .72rem;
+    cursor: pointer; transition: background .15s, color .15s;
+    color: var(--muted);
+  }
+  .toggle-group input:checked + label {
+    background: var(--accent); color: var(--bg); font-weight: 700;
+  }
+
+  .btn {
+    padding: 11px 28px;
+    background: var(--accent); color: var(--bg);
+    border: none; border-radius: 8px;
+    font-family: var(--sans); font-weight: 700; font-size: .9rem;
+    cursor: pointer; transition: opacity .15s, transform .1s;
+    margin-left: auto;
+  }
+  .btn:hover { opacity: .88; }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+
+  /* ── Spinner ── */
+  .spinner {
+    display: none; width: 20px; height: 20px;
+    border: 3px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite;
+    margin-right: 8px;
+  }
+  .spinner.active { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Results ── */
+  #results { display: none; }
+  #results.visible { display: block; }
+
+  .result-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px;
+  }
+  .result-title { font-size: 1rem; font-weight: 700; }
+  .badge {
+    font-family: var(--mono); font-size: .68rem;
+    padding: 4px 10px; border-radius: 20px;
+    background: rgba(79,255,176,.12); color: var(--accent);
+    border: 1px solid rgba(79,255,176,.3);
+  }
+
+  /* Aggregate result */
+  .agg-card {
+    background: linear-gradient(135deg, rgba(79,255,176,.07), rgba(0,200,255,.07));
+    border: 1px solid rgba(79,255,176,.25);
+    border-radius: var(--radius); padding: 24px; margin-bottom: 20px;
+  }
+  .agg-class {
+    font-size: 1.6rem; font-weight: 800;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin-bottom: 4px;
+  }
+  .agg-conf {
+    font-family: var(--mono); font-size: .78rem; color: var(--muted);
+    margin-bottom: 20px;
+  }
+
+  /* Bar chart */
+  .bars { display: flex; flex-direction: column; gap: 10px; }
+  .bar-row { display: grid; grid-template-columns: 180px 1fr 60px; align-items: center; gap: 10px; }
+  .bar-label { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+  .bar-track {
+    height: 8px; background: var(--border); border-radius: 4px; overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%; border-radius: 4px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width .5s cubic-bezier(.4,0,.2,1);
+  }
+  .bar-val { font-family: var(--mono); font-size: .72rem; text-align: right; }
+
+  /* Per-image table */
+  .img-table { display: flex; flex-direction: column; gap: 10px; }
+  .img-row {
+    display: grid; grid-template-columns: 52px 1fr auto;
+    align-items: center; gap: 14px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px;
+  }
+  .img-thumb { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; }
+  .img-name { font-family: var(--mono); font-size: .72rem; color: var(--muted); word-break: break-all; }
+  .img-class { font-weight: 700; font-size: .88rem; }
+  .img-conf { font-family: var(--mono); font-size: .7rem; color: var(--muted); }
+  .img-chip {
+    font-family: var(--mono); font-size: .65rem;
+    padding: 3px 10px; border-radius: 12px; white-space: nowrap;
+    background: rgba(79,255,176,.12); color: var(--accent);
+    border: 1px solid rgba(79,255,176,.25);
+  }
+
+  /* ── Error ── */
+  .error-msg {
+    background: rgba(255,79,107,.08); border: 1px solid rgba(255,79,107,.3);
+    border-radius: 8px; padding: 14px 18px;
+    font-family: var(--mono); font-size: .78rem; color: var(--danger);
+    display: none;
+  }
+  .error-msg.visible { display: block; }
+
+  @media (max-width: 560px) {
+    .bar-row { grid-template-columns: 130px 1fr 48px; }
+    .btn { width: 100%; margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo-row">
+    <div class="logo-icon">🧠</div>
+    <h1>NeuroScan</h1>
+  </div>
+  <p class="subtitle">// ALZHEIMER MRI CLASSIFIER — SWIN-B 224 + PROGRESSIVE FINE-TUNING</p>
+</header>
+
+<main>
+
+  <!-- Drop zone card -->
+  <div class="card">
+    <div id="dropzone">
+      <input type="file" id="file-input" multiple accept="image/*" />
+      <div class="dz-icon">🖼️</div>
+      <div class="dz-primary">Drop images here or click to browse</div>
+      <div class="dz-secondary">Accepts .jpg / .png / .tiff — single image, multiple, or a ZIP of a folder</div>
+    </div>
+    <div id="preview-area"></div>
+  </div>
+
+  <!-- Controls card -->
+  <div class="card">
+    <div class="row">
+      <span class="mode-label">OUTPUT MODE //</span>
+      <div class="toggle-group">
+        <input type="radio" name="mode" id="mode-agg" value="max_probability" checked />
+        <label for="mode-agg">Max Probability</label>
+        <input type="radio" name="mode" id="mode-per" value="per_image" />
+        <label for="mode-per">Per Image</label>
+      </div>
+      <div class="spinner" id="spinner"></div>
+      <button class="btn" id="predict-btn" disabled>Run Prediction</button>
+    </div>
+    <div class="error-msg" id="error-msg"></div>
+  </div>
+
+  <!-- Results card -->
+  <div class="card" id="results">
+    <div class="result-header">
+      <span class="result-title">Results</span>
+      <span class="badge" id="result-badge"></span>
+    </div>
+    <div id="results-body"></div>
+  </div>
+
+</main>
+
+<script>
+const fileInput   = document.getElementById('file-input');
+const dropzone    = document.getElementById('dropzone');
+const previewArea = document.getElementById('preview-area');
+const predictBtn  = document.getElementById('predict-btn');
+const spinner     = document.getElementById('spinner');
+const resultsDiv  = document.getElementById('results');
+const resultsBody = document.getElementById('results-body');
+const resultBadge = document.getElementById('result-badge');
+const errorMsg    = document.getElementById('error-msg');
+
+let selectedFiles = [];
+
+// ── Drag & drop ──────────────────────────────────────────────────────────────
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag-over'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('drag-over');
+  addFiles([...e.dataTransfer.files]);
+});
+fileInput.addEventListener('change', () => addFiles([...fileInput.files]));
+
+function addFiles(newFiles) {
+  // Accept images + ZIP (folder)
+  const valid = newFiles.filter(f => f.type.startsWith('image/') || f.name.endsWith('.zip'));
+  selectedFiles = [...selectedFiles, ...valid];
+  renderPreviews();
+  predictBtn.disabled = selectedFiles.length === 0;
+}
+
+function removeFile(idx) {
+  selectedFiles.splice(idx, 1);
+  renderPreviews();
+  predictBtn.disabled = selectedFiles.length === 0;
+}
+
+const MAX_PREVIEW = 8;
+function renderPreviews() {
+  previewArea.innerHTML = '';
+  previewArea.className = selectedFiles.length > 0 ? 'visible' : '';
+  const show = selectedFiles.slice(0, MAX_PREVIEW);
+  show.forEach((f, i) => {
+    const div = document.createElement('div');
+    div.className = 'thumb';
+    if (f.type.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(f);
+      div.appendChild(img);
+    } else {
+      div.style.display = 'grid';
+      div.style.placeItems = 'center';
+      div.style.fontSize = '1.6rem';
+      div.textContent = '📦';
+    }
+    const btn = document.createElement('button');
+    btn.className = 'rm'; btn.textContent = '×';
+    btn.addEventListener('click', () => removeFile(i));
+    div.appendChild(btn);
+    previewArea.appendChild(div);
+  });
+  if (selectedFiles.length > MAX_PREVIEW) {
+    const badge = document.createElement('div');
+    badge.className = 'more-badge';
+    badge.textContent = `+${selectedFiles.length - MAX_PREVIEW}`;
+    previewArea.appendChild(badge);
+  }
+}
+
+// ── Predict ──────────────────────────────────────────────────────────────────
+predictBtn.addEventListener('click', async () => {
+  if (!selectedFiles.length) return;
+
+  const mode = document.querySelector('input[name=mode]:checked').value;
+
+  // Expand ZIPs client-side if JSZip available — skip for now; server handles raw images
+  const imageFiles = selectedFiles.filter(f => f.type.startsWith('image/'));
+
+  setLoading(true);
+  showError('');
+
+  const fd = new FormData();
+  imageFiles.forEach(f => fd.append('files', f));
+  fd.append('mode', mode);
+
+  try {
+    const res = await fetch('/predict', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    renderResults(data, mode, imageFiles);
+  } catch(e) {
+    showError(e.message);
+  } finally {
+    setLoading(false);
+  }
+});
+
+function setLoading(on) {
+  spinner.className = on ? 'spinner active' : 'spinner';
+  predictBtn.disabled = on;
+  predictBtn.textContent = on ? 'Running…' : 'Run Prediction';
+}
+
+function showError(msg) {
+  errorMsg.textContent = msg;
+  errorMsg.className = msg ? 'error-msg visible' : 'error-msg';
+}
+
+// ── Render results ────────────────────────────────────────────────────────────
+function renderResults(data, mode, imageFiles) {
+  resultsDiv.className = 'card visible';
+  resultsBody.innerHTML = '';
+
+  if (mode === 'max_probability') {
+    resultBadge.textContent = `${data.num_images} image(s) · max-prob mode`;
+    renderAggregate(data);
+    if (data.per_image && data.per_image.length > 1) {
+      const sep = document.createElement('p');
+      sep.style.cssText = 'margin:20px 0 12px;font-size:.82rem;font-weight:700;';
+      sep.textContent = 'Individual images';
+      resultsBody.appendChild(sep);
+      renderPerImage(data.per_image, imageFiles);
+    }
+  } else {
+    resultBadge.textContent = `${data.results.length} image(s) · per-image mode`;
+    renderPerImage(data.results, imageFiles);
+  }
+}
+
+function renderAggregate(data) {
+  const probs = data.max_probabilities;
+  const sorted = Object.entries(probs).sort((a,b) => b[1]-a[1]);
+
+  const card = document.createElement('div');
+  card.className = 'agg-card';
+  card.innerHTML = `
+    <div class="agg-class">${data.predicted_class}</div>
+    <div class="agg-conf">Top prediction (max probability across all images)</div>
+    <div class="bars">
+      ${sorted.map(([cls, p]) => `
+        <div class="bar-row">
+          <span class="bar-label">${cls}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${(p*100).toFixed(1)}%"></div></div>
+          <span class="bar-val">${(p*100).toFixed(1)}%</span>
+        </div>`).join('')}
+    </div>`;
+  resultsBody.appendChild(card);
+}
+
+function renderPerImage(items, imageFiles) {
+  // Build a filename -> ObjectURL map for preview
+  const urlMap = {};
+  imageFiles.forEach(f => { urlMap[f.name] = URL.createObjectURL(f); });
+
+  const table = document.createElement('div');
+  table.className = 'img-table';
+
+  items.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'img-row';
+    const conf = (item.confidence * 100).toFixed(1);
+    const src  = urlMap[item.filename] || '';
+    row.innerHTML = `
+      ${src ? `<img class="img-thumb" src="${src}" />` : '<div class="img-thumb" style="background:var(--border);display:grid;place-items:center;font-size:1.2rem">🖼️</div>'}
+      <div>
+        <div class="img-name">${item.filename}</div>
+        <div class="img-class">${item.predicted_class}</div>
+        <div class="img-conf">${conf}% confidence</div>
+      </div>
+      <span class="img-chip">${item.predicted_class}</span>`;
+    table.appendChild(row);
+  });
+  resultsBody.appendChild(table);
+}
+</script>
+</body>
+</html
