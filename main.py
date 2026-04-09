@@ -1,26 +1,30 @@
-from module.cross_validation import Cross_Validator
-from module.utils import Logger
+import argparse
+import json
 
-def run_batch():
-    models = ["resnet18"]
-    classifier_map = {"resnet18" : ['baseline', 'progressive', 'evidential', 'metric_learning', 'regularized',
-                 'attention_enhanced', 'progressive_evidential', 'clinical_grade', 'hybrid_transformer', 'ultimate']}
+from module import Cross_Validator, Logger
 
+def run_batch(models, classifier_map):
     logger = Logger("batch_" + str(hash(str(models)))[:8])
     logger.info(f"Starting validation for {models}")
     logger.info(f"Classifier mapping: {classifier_map}")
     
-    try:
-        validator = Cross_Validator(
-            models,
-            logger,
-            model_classifier_map=classifier_map
-        )
-        validator.run()
-        logger.info("Validation complete")
-    except Exception as e:
-        logger.error(f"Batch failed: {e}")
-        raise
+    validator = Cross_Validator(
+        models,
+        logger,
+        model_classifier_map=classifier_map
+    )
+    validator.run()
+    logger.info("Validation complete")
+
 
 if __name__ == "__main__":
-    run_batch()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--models", type=str, required=True)
+    parser.add_argument("--classifier_map", type=str, required=True)
+
+    args = parser.parse_args()
+
+    models = json.loads(args.models)
+    classifier_map = json.loads(args.classifier_map)
+
+    run_batch(models, classifier_map)
