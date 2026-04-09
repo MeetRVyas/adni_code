@@ -15,8 +15,8 @@ import torch.optim as optim
 import timm
 import numpy as np
 
-from classifiers.base_classifier import BaseClassifier
-from classifiers.techniques import SAM
+from module.classifiers.base_classifier import BaseClassifier
+from module.classifiers.techniques import SAM
 
 
 class FocalLoss(nn.Module):

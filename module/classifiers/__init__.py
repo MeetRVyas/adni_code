@@ -37,13 +37,13 @@ Usage:
     results = clf.evaluate(test_loader)
 """
 
-from classifiers.base_classifier import BaseClassifier
+from module.classifiers.base_classifier import BaseClassifier
 
 # Basic classifiers
-from classifiers.progressive_classifier import ProgressiveClassifier
+from module.classifiers.progressive_classifier import ProgressiveClassifier
 
 # Advanced classifiers
-from classifiers.advanced_classifiers import (
+from module.classifiers.advanced_classifiers import (
     BaselineClassifier,
     EvidentialClassifier,
     MetricLearningClassifier,
@@ -56,7 +56,7 @@ from classifiers.advanced_classifiers import (
 )
 
 # Testing framework
-from classifiers.testing import (
+from module.classifiers.testing import (
     test_all_classifiers_on_model,
     test_single_classifier,
     compare_classifiers,
