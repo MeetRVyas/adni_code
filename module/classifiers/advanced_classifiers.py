@@ -21,9 +21,9 @@ import timm
 from typing import Optional
 import copy
 
-from .base_classifier import BaseClassifier
-from .evidential import UniversalEvidentialModel, EvidentialLoss, EvidentialLayer
-from .techniques import (
+from classifiers.base_classifier import BaseClassifier
+from classifiers.evidential import UniversalEvidentialModel, EvidentialLoss, EvidentialLayer
+from classifiers.techniques import (
     SAM, CenterLoss, TripletLoss, ManifoldMixup, CosineClassifier,
     SEBlock, DistanceAwareLabelSmoothing, PrototypicalNetwork,
     manifold_mixup_loss, create_triplet_batch

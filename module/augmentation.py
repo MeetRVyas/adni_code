@@ -3,7 +3,7 @@ from torchvision import transforms
 import torch.nn.functional as F
 from torchvision import transforms
 import numpy as np
-from .config import DEVICE
+from module.config import DEVICE
 
 
 def get_gpu_augmentations(img_size):

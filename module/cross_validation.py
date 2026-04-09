@@ -12,12 +12,12 @@ import matplotlib.pyplot as plt
 import gc
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
-from .models import get_model, get_img_size, check_model
-from .utils import *
-from .config import *
-from .visualization import Visualizer
-from .test import test_model
-from classifiers import list_classifiers, get_classifier, BaseClassifier
+from module.models import get_model, get_img_size, check_model
+from module.utils import *
+from module.config import *
+from module.visualization import Visualizer
+from module.test import test_model
+from module.classifiers import list_classifiers, get_classifier, BaseClassifier
 
 
 class Cross_Validator:

@@ -11,7 +11,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from . import (
+from classifiers import (
     ProgressiveClassifier,
     BaselineClassifier,
     EvidentialClassifier,

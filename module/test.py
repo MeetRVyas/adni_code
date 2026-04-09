@@ -16,11 +16,11 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import pandas as pd
-from .config import DEVICE, REPORTS_DIR, NUM_SAMPLES_TO_ANALYSE
-from .visualization import Visualizer
-from .utils import get_base_transformations
-from .models import get_img_size
-from .classifiers import BaseClassifier
+from module.config import DEVICE, REPORTS_DIR, NUM_SAMPLES_TO_ANALYSE
+from module.visualization import Visualizer
+from module.utils import get_base_transformations
+from module.models import get_img_size
+from module.classifiers import BaseClassifier
 
 
 def test_model(model_name, model, loader, classes, experiment_name, logger, history = None,
@@ -143,7 +143,7 @@ def test_model(model_name, model, loader, classes, experiment_name, logger, hist
             roc_auc = roc_auc_score(y_true, y_prob[:, 1])
         else:
             roc_auc = roc_auc_score(y_true, y_prob, multi_class='ovr', average='macro')
-    except:
+    except Exception as e :
         logger.warning(f"Unexpected error in ROC AUC calculation: {e}")
         roc_auc = 0.0
     
