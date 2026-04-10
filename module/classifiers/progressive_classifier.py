@@ -518,11 +518,11 @@ class ProgressiveClassifier(BaseClassifier):
         # Create scheduler
         if self.architecture_type == 'cnn':
             lr_multipliers = [1/100, 1/10, 1/3, 1.0, 10.0]
-            max_lr = [lr * m for m in lr_multipliers[:len(param_groups)]]
+            max_lr = [lr * m for m in lr_multipliers[:len(list(param_groups))]]
 
             scheduler = optim.lr_scheduler.OneCycleLR(
                 optimizer.base_optimizer if use_sam else optimizer,
-                max_lr=max_lr if freeze_mode != 'all_discriminative' else lr * 10,  # Max LR for classifier
+                max_lr=max_lr if freeze_mode == 'all_discriminative' else lr * 10,  # Max LR for classifier
                 epochs=epochs,
                 steps_per_epoch=len(train_loader),
                 pct_start=0.3,
