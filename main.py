@@ -128,7 +128,6 @@ def run_test(models, classifier_map, test_all, logger):
             f"best_acc -> {classifier.best_acc}"
             f"best_f1 -> {classifier.best_f1}"
             f"best_epoch -> {classifier.best_epoch}")
-        logger.info(test_results)
         logger.info(f"Test mode complete for {model_name}")
 
 def configure(
