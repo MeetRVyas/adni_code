@@ -321,9 +321,9 @@ def test_single_classifier(
     # Create classifier
     clf_class = CLASSIFIER_MAP[classifier_name]
     classifier = clf_class(
-        model_name=model_name,
-        num_classes=len(class_names),
-        device=device,
+        model_name = model_name,
+        num_classes = len(class_names),
+        device = device,
         class_weights_tensor = class_weights_tensor
     )
     

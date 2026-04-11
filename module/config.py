@@ -25,7 +25,7 @@ PRETRAINED = True
 NUM_SAMPLES_TO_ANALYSE = 5  # For GradCAM/XAI visualization
 TEST_SPLIT = 0.2
 PATIENCE = 10
-MIN_DELTA = 0.3  # For legacy compatibility
+MIN_DELTA = 0.001  # For legacy compatibility
 LR = 1e-4
 
 # Optimization settings

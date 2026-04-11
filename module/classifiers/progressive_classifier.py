@@ -439,7 +439,7 @@ class ProgressiveClassifier(BaseClassifier):
                 freeze_mode='top_50',
                 use_sam=False,
                 primary_metric=primary_metric,
-                patience=7,
+                patience=10,
                 min_delta=min_delta
             )
         
@@ -584,8 +584,7 @@ class ProgressiveClassifier(BaseClassifier):
                 print(f"  [Epoch {epoch+1}/{epochs}] {primary_metric}: {primary_value:.4f} ★, "
                       f"Acc: {val_acc:.2f}%, Recall: {val_recall:.4f}")
                 self.best_epoch = epoch + 1
-                torch.save(self.model.state_dict(),
-                          f'ProgressiveClassifier_{self.model_name}_best.pth')
+                self.save(self.checkpoint_path)
                 patience_counter = 0
             else:
                 print(f"  [Epoch {epoch+1}/{epochs}] {primary_metric}: {primary_value:.4f}, "
