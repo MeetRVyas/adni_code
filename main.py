@@ -28,6 +28,10 @@ def _parse_args():
                         help="Number of training epochs (overrides config.EPOCHS)")
     parser.add_argument("--folds",  type=int, default=None,
                         help="Number of CV folds (overrides config.NFOLDS)")
+    
+
+    parser.add_argument("--patience",  type=int, default=None,
+                        help="Number of epochs for Early Stopping (overrides config.PATIENCE)")
 
     return parser.parse_args()
 
@@ -56,6 +60,7 @@ def run_test(models, classifier_map, test_all, logger):
     from torchvision import transforms
     from sklearn.model_selection import train_test_split
     import numpy as np
+    import torch
 
     logger.info(f"Starting test mode for {models}")
     logger.info(f"Test-all classifiers: {test_all}")
@@ -65,6 +70,12 @@ def run_test(models, classifier_map, test_all, logger):
     base_dataset = FullDataset(DATA_DIR, temp_transform)
     targets = np.array(base_dataset.targets)
     classes = base_dataset.classes
+
+    # Calculate Class Weights (same for all models)
+    class_counts = np.bincount(targets)
+    total_samples = len(targets)
+    class_weights = total_samples / (len(classes) * class_counts)
+    class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
 
     train_val_indices, test_indices = train_test_split(
         np.arange(len(targets)),
@@ -102,6 +113,7 @@ def run_test(models, classifier_map, test_all, logger):
                 val_loader=val_loader,
                 test_loader=test_loader,
                 classifiers='all',
+                class_weights_tensor=class_weights_tensor,
                 class_names=classes,
                 epochs=EPOCHS,
                 lr=LR,
@@ -118,6 +130,7 @@ def run_test(models, classifier_map, test_all, logger):
                 val_loader=val_loader,
                 test_loader=test_loader,
                 class_names=classes,
+                class_weights_tensor=class_weights_tensor,
                 epochs=EPOCHS,
                 lr=LR,
                 primary_metric=OPTIMIZE_METRIC,
@@ -135,6 +148,7 @@ def configure(
     output_dir: str = None,
     epochs:     int = None,
     nfolds:     int = None,
+    patience:   int = None,
 ):
     """
     Override mutable config values at runtime (called from main.py before
@@ -159,6 +173,9 @@ def configure(
     if nfolds is not None:
         cfg.NFOLDS = nfolds
 
+    if patience is not None:
+        cfg.PATIENCE = patience
+
     # (Re-)create directories after any path changes
     os.makedirs(cfg.PLOTS_DIR,   exist_ok=True)
     os.makedirs(cfg.REPORTS_DIR, exist_ok=True)
@@ -173,6 +190,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         epochs=args.epochs,
         nfolds=args.folds,
+        patience=args.patience,
     )
 
     from module import Logger

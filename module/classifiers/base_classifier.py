@@ -75,7 +75,7 @@ class BaseClassifier(ABC):
         """Compute loss from model outputs and labels."""
         pass
     
-    def get_predictions(self, outputs, use_weights: bool = False, use_activation: bool = True) -> torch.Tensor:
+    def get_predictions(self, outputs, use_weights: bool = True, use_activation: bool = True) -> torch.Tensor:
         """
         Convert model outputs to class predictions.
         

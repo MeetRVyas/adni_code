@@ -47,6 +47,7 @@ def test_all_classifiers_on_model(
     test_loader,
     classifiers: List[str] = 'all',
     class_names: Optional[List[str]] = None,
+    class_weights_tensor : torch.FloatTensor = None,
     epochs: int = 30,
     lr: float = 1e-4,
     primary_metric: str = 'recall',
@@ -132,9 +133,10 @@ def test_all_classifiers_on_model(
             
             clf_class = CLASSIFIER_MAP[clf_name]
             classifier = clf_class(
-                model_name=model_name,
-                num_classes=len(class_names),
-                device=device
+                model_name = model_name,
+                num_classes = len(class_names),
+                device = device,
+                class_weights_tensor = class_weights_tensor
             )
             
             # Train
@@ -271,6 +273,7 @@ def test_single_classifier(
     val_loader,
     test_loader,
     class_names: Optional[List[str]] = None,
+    class_weights_tensor : torch.FloatTensor = None,
     epochs: int = 30,
     lr: float = 1e-4,
     primary_metric: str = 'recall',
@@ -320,7 +323,8 @@ def test_single_classifier(
     classifier = clf_class(
         model_name=model_name,
         num_classes=len(class_names),
-        device=device
+        device=device,
+        class_weights_tensor = class_weights_tensor
     )
     
     # Train
