@@ -75,7 +75,7 @@ class BaseClassifier(ABC):
         """Compute loss from model outputs and labels."""
         pass
     
-    def get_predictions(self, outputs, use_weights: bool = False) -> torch.Tensor:
+    def get_predictions(self, outputs, use_weights: bool = False, use_activation: bool = True) -> torch.Tensor:
         """
         Convert model outputs to class predictions.
         
@@ -96,7 +96,15 @@ class BaseClassifier(ABC):
             log_weights = torch.log(self.class_weights_tensor + 1e-10)
             outputs = outputs + log_weights.view(1, -1)
             
-        return torch.argmax(outputs, dim=1)
+        # return torch.argmax(outputs, dim=1)
+
+        if use_activation:
+            probs = torch.softmax(outputs, dim=1)
+        else:
+            probs = outputs # still logits
+
+        preds = torch.argmax(probs, dim=1)
+        return preds
     
     def _get_metric_value(self, labels: List, preds: List, metric: str) -> float:
         """Calculate specific metric value."""
