@@ -96,7 +96,7 @@ def run_test(models, classifier_map, test_all, logger):
 
         if test_all:
             logger.info(f"Running test_all_classifiers_on_model for {model_name}")
-            test_all_classifiers_on_model(
+            test_results = test_all_classifiers_on_model(
                 model_name=model_name,
                 train_loader=train_loader,
                 val_loader=val_loader,
@@ -111,7 +111,7 @@ def run_test(models, classifier_map, test_all, logger):
         else:
             classifier_type = classifier_map.get(model_name, 'baseline')
             logger.info(f"Running test_single_classifier for {model_name} with '{classifier_type}'")
-            test_single_classifier(
+            test_results, classifier = test_single_classifier(
                 classifier_name=classifier_type,
                 model_name=model_name,
                 train_loader=train_loader,
@@ -124,6 +124,11 @@ def run_test(models, classifier_map, test_all, logger):
                 device=DEVICE,
             )
 
+            logger.info(f"best_recall -> {classifier.best_recall}"
+            f"best_acc -> {classifier.best_acc}"
+            f"best_f1 -> {classifier.best_f1}"
+            f"best_epoch -> {classifier.best_epoch}")
+        logger.info(test_results)
         logger.info(f"Test mode complete for {model_name}")
 
 def configure(
