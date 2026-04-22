@@ -1,11 +1,35 @@
+# ── Core data processing ──────────────────────────────────────────────────────
+pyarrow
+pandas
+numpy
+
+# ── Parallel processing ───────────────────────────────────────────────────────
+dask[dataframe]
+                          # (Optional — falls back to pandas if missing)
+
+# ── Medical image format support ─────────────────────────────────────────────
+Pillow
+pydicom
+nibabel
+
+# ── Dataset download ──────────────────────────────────────────────────────────
+kaggle
+datasets
+
+# ── Streaming DataLoader ──────────────────────────────────────────────────────
+webdataset
+                          # (Optional — falls back to RegistryDataset if missing)
+
+# ── Experiment tracking ───────────────────────────────────────────────────────
+mlflow
+                          # (Optional — falls back to CSV if missing)
+
+# ── Quality checks ────────────────────────────────────────────────────────────
+scikit-learn
 torch
 torchvision
-numpy
-pandas
-scikit-learn
 scikit-image
 opencv-python
-Pillow
 tqdm
 matplotlib
 seaborn
@@ -14,3 +38,339 @@ timm
 ttach
 huggingface_hub
 pytorch_grad_cam
+
+
+# format :
+"""txt
+You are a [role].
+
+Context:
+[Background info, assumptions, inputs]
+
+Task:
+[What you want done]
+
+Constraints:
+[Rules, limits, style, tools, depth]
+
+Output:
+[Format, structure, level of detail]
+"""
+
+# Other rules
+1. Be Explicit, Not Polite
+❌ Bad : Can you maybe explain transformers?
+✅ Good : Explain transformers to a 3rd year CSE student. Focus on intuition first, then math.
+2. Always Specify the LEVEL
+- LLMs default to “medium blog post” level.
+- Examples:
+  - “Assume I’m a beginner”
+  - “Assume I’m a 3rd year CSE student”
+  - “Explain like I’ll implement this tomorrow”
+  - “High-level, no math”
+  - “Deep technical, include edge cases”
+3. Tell It How to Think (But Not Always Verbosely)
+- Use phrases like : “Think step by step”, “First reason, then answer”, “List assumptions before answering”, “Explain tradeoffs”
+4. Ask for STRUCTURED OUTPUT
+Examples: Bullet points, Tables, Sections, Step-by-step lists, Code + explanation separately
+
+# Coding
+## Rules : Language + version, Context (where code runs), Expected behavior, Constraints (performance, memory, libraries)
+
+## Debugging : Role + Contextual Code + Task
+Example for giving tasks in debugging :
+"""
+- Identify the root cause
+- Explain why it happens
+- Propose a fix
+- Show the corrected code only at the end
+"""
+
+## Large Codebase changes
+"""
+Given the following files:
+<File A>
+<File B>
+
+Goal: Add feature X without breaking existing behavior.
+
+Rules:
+- Do not change public APIs
+- Minimize diff size
+- Call out any risky changes
+"""
+
+## Architecture and Design
+"""
+Design a system for X.
+
+Assume:
+- Scale: ___
+- Latency: ___
+- Failure tolerance: ___
+
+First:
+- List key design decisions
+- Then compare 2–3 approaches
+- Then recommend one
+"""
+
+# Teaching + Research
+## Feynman Technique
+"""
+Explain <topic> in simple terms.
+Then explain it again at a graduate level.
+Then list common misconceptions.
+"""
+
+# Writing content
+## Email
+"""
+Write a professional email.
+
+Context:
+- Audience: <who>
+- Goal: <what outcome>
+- Tone: calm, confident, concise
+- Length: under 150 words
+
+Return 2 variations:
+- Formal
+- Slightly friendly
+"""
+
+## High Quality writing trick
+- Write the content.
+- Then rewrite it to:
+    - Remove fluff
+    - Improve clarity
+    - Sound more confident
+
+## Data Analysis Prompts
+# Analytical Reasoning
+"""
+You are a data analyst.
+
+Given this dataset description:
+<description>
+
+Task:
+- Identify possible analyses
+- Choose the most informative one
+- Explain assumptions
+- Interpret results cautiously
+"""
+
+
+"If any conclusion is statistically weak or misleading, explicitly warn me."
+
+Instead of : Think step by step
+Use : Show your reasoning briefly, then give a clean final answer.
+
+# Patterns to use
+1. Role Stacking : "You are both a software architect and a performance engineer."
+2. Critique Mode : "Give me the answer, then critique it as if you were an interviewer."
+3. Compare & Decide : "Compare 3 approaches, then recommend one based on my constraints."
+4. Self-Check : "After answering, list possible mistakes or uncertainties."
+
+# Don't do the following :
+- Being vague
+- Not stating assumptions
+- Asking multiple unrelated questions at once
+- Restarting instead of iterating
+- Expecting perfect answers on first try
+
+# ChatGPT
+"""
+1. Think in steps.
+2. If assumptions are missing, state them.
+3. If multiple solutions exist, compare.
+"""
+
+# Claude
+"""
+1. Analyze the code first.
+2. List bugs or design flaws.
+3. Propose minimal, safe changes.
+4. Output only the final code diff.
+"""
+
+# Prompting frameworks
+## After producing the solution:
+"""
+1. Critique it as a skeptical reviewer
+2. Identify weaknesses
+3. Improve the solution
+"""
+
+## Solving a problem
+"""
+1. Break this problem into subproblems.
+2. Solve each independently.
+3. Then integrate into a final answer.
+"""
+
+## Constraints
+
+## Examples
+
+# Meta Prompting
+## Idea -> Prompt
+"""
+I want you to act as a meta-prompting system.
+
+Your job is to take my rough idea and turn it into a high-quality prompt that will get the best possible result from an LLM.
+
+Input:
+<my rough idea>
+
+Output:
+- A clear, structured prompt
+- Any assumptions I should be aware of
+- Suggestions for better inputs
+"""
+
+## Prompt -> Prompt
+"""
+Here is my prompt:
+<prompt>
+
+Rewrite it to get more precise, higher-quality results.
+Explain what you changed.
+"""
+
+# Nice things
+- "Define success clearly"
+- "Add constraints"
+- "Specify process"
+- "Control output format"
+- "Iterate aggressively"
+
+# Coding Prompt Frameworks
+## Test-First Development
+"""
+I need a TypeScript function that parses a CSV string into a JSON object.
+Step 1: Write a comprehensive set of Jest unit tests for this function. Include edge cases for empty strings, malformed headers, and quoted values containing commas.
+Step 2: Only after generating the tests, write the implementation that passes these exact tests.
+"""
+
+## "Chain of Density" for Documentation
+"""
+Write a docstring for this function.
+Iteration 1: Write a standard verbose docstring.
+Iteration 2: Rewrite it to be 30% shorter but include more specific details about parameters and return types.
+Iteration 3: Rewrite it again to be extremely concise (1-2 sentences) but retain ALL technical constraints and edge case warnings from the previous versions.
+Final Output: Only show the Iteration 3 docstring.
+"""
+
+## FIM (Fill-In-The-Middle) Trick
+- "Completion" models (like Copilot)
+"""
+I have the following setup code:
+[Paste setup/imports/variable init]
+And I need to end up with this result:
+[Paste expected return value or final state]
+Task: Write strictly the code required to bridge the gap between the setup and the result. Do not repeat the setup or result.
+"""
+
+##  "Metacognitive" Debugging
+"""
+You suggested using a useEffect hook here.
+Critique: List 3 reasons why this might be a bad idea or lead to bugs (e.g., race conditions, memory leaks).
+Confidence: Rate your confidence in this solution from 0-100%. If it's below 90%, propose a safer alternative.
+Alternative: Propose a solution that does not use useEffect.
+"""
+
+# Reverse Prompt Engineering
+"""
+Analyze the following Code Snippet.
+Task: Write a highly detailed 'System Prompt' that I could give to an AI so that it would generate code exactly like this style, including the specific error handling patterns, naming conventions, and architectural choices used here.
+"""
+
+```text
+You are a highly skilled and knowledgeable software engineer, specializing in the Linux kernel development style. Your task is to generate C code that perfectly replicates the characteristics of the Linux kernel's codebase, including its rigorous adherence to coding standards, error handling, memory management, and architectural design principles. You will be provided with specific requirements for functionality, and you must write code that is indistinguishable from the real kernel.  Assume you are operating within a kernel context and have access to all standard kernel header files and functions.
+
+**Core Principles & Style Guidelines (MUST ADHERE TO THESE)**
+
+1.  **Coding Style (Follow the Linux Kernel's Coding Style - absolutely critical):**
+    *   **Indentation:** 4 spaces, *no tabs*. Consistent and meticulous use of indentation.
+    *   **Braces:** K&R style (brace on the same line as the control statement):
+        ```c
+        if (condition) {
+            // code
+        } else {
+            // code
+        }
+        ```
+    *   **Line Length:** Limit lines to 80 characters (strictly enforced). Break long lines appropriately.
+    *   **Comments:**  Use descriptive comments.  Every function needs a comment block at the top explaining its purpose, parameters, return values, and any side effects.  Use `/** */` for multi-line comments and `//` for single-line comments.  Comment *everything* including complex logic within functions. Use "/* FALLTHROUGH */" where appropriate.
+    *   **Blank Lines:** Use blank lines liberally to separate logical blocks of code and improve readability.
+    *   **Naming Conventions:**
+        *   **Variables:** `snake_case` (e.g., `device_id`, `buffer_size`).  Use descriptive names. Prefix local variables with `local_`.
+        *   **Functions:** `snake_case` (e.g., `init_device()`, `read_data()`).  Functions related to a struct should generally prefix the struct's name.
+        *   **Macros:** `UPPER_CASE_WITH_UNDERSCORES` (e.g., `DEBUG_PRINT`, `MAX_BUFFER_SIZE`).
+        *   **Structures:** `PascalCase` with `_t` suffix, often with a prefix indicating module or subsystem. (e.g., `MyModule_Device_t`, `Slab_Cache_t`).
+        *   **Typedefs:** Structures should have a `_t` suffix and the type definition itself should use the same name without the `_t` to improve readability (e.g., `typedef struct MyStruct_t MyStruct;`).  Always define struct types using `struct` keyword, even if the typedef is present.
+    *   **Structure Member Alignment:** Avoid unnecessary structure member padding.  Consider the use of `packed` attributes if necessary.
+    *   **Include Headers:** Include headers *in the correct order* (system headers first, then local headers).  Use `#include <linux/module.h>` as the first header within any kernel module.
+    *   **Function Prototypes:**  Always use complete function prototypes. Don't omit parameter types.
+    *   **`static` Keyword:** Use the `static` keyword liberally to limit the scope of functions and variables whenever possible.
+    *   **Avoid Global Variables:** Minimize the use of global variables.  Prefer passing data through function parameters or using a per-device/per-instance structure.
+    *   **Volatile Variables:** Use `volatile` whenever a variable might be modified by hardware or an interrupt handler.
+
+2.  **Error Handling (Crucially important):**
+    *   **Return Codes:** Use integer return codes to indicate success (usually 0 or a positive value) and failure (negative error codes from `<errno.h>`).  Never return `NULL` for pointers in a kernel context except under very specific circumstances where kernel-level allocations have failed or the interface is explicitly defined to do so.
+    *   **`printk()`:** Use `printk()` for logging messages to the kernel log.  Use appropriate log levels (e.g., `KERN_INFO`, `KERN_WARNING`, `KERN_ERR`, `KERN_DEBUG`).  Use `pr_debug()` or `dev_dbg()` (within device drivers) if DEBUG is enabled.  Avoid excessive logging in production code.  Use `trace_printk()` for tracing.
+    *   **`if (IS_ERR(ptr))` and `PTR_ERR(ptr)`:**  Use these macros to check for and extract error codes from pointer-typed return values.
+    *   **Error Propagation:**  Propagate errors from lower-level functions to the calling functions by returning the error code. Do not swallow errors. Handle the errors appropriately, such as releasing resources, and returning the error code to the caller.
+    *   **Resource Management:** Carefully manage resources (memory, file descriptors, locks, etc.) and release them in error paths. Use `goto` statements to implement cleanup paths in case of errors, ensuring *everything* is cleaned up before returning an error.
+    *   **Asserts:** Use `BUG_ON()` for internal consistency checks.
+    *   **Memory Allocation:**  Use `kmalloc()`, `kzalloc()`, `kcalloc()`, and associated functions for kernel memory allocation.  Always check the return value of memory allocation functions for `NULL`.  Free allocated memory with `kfree()`.
+    *   **Spinlocks and Mutexes:**  Use `spin_lock_irqsave()`, `spin_unlock_irqrestore()`, and `mutex_lock()`, `mutex_unlock()` (or their corresponding functions) to protect shared resources.  Use appropriate locking primitives.  Be very careful with locking order.
+
+3.  **Memory Management:**
+    *   **`kmalloc()`:** Allocate memory using `kmalloc()` and related functions (e.g. `kzalloc`). Pass the appropriate `GFP_` flags (e.g., `GFP_KERNEL`, `GFP_ATOMIC`, `GFP_USER`, etc.) considering the context. Always check the result to see if memory allocation was successful.
+    *   **`kfree()`:** Free memory using `kfree()` after it is no longer needed.
+    *   **Slab Allocation:**  Consider using slab allocators (e.g., creating and managing a `kmem_cache`) for frequently allocated and freed objects to improve performance and reduce fragmentation.
+
+4.  **Concurrency and Locking:**
+    *   **Spinlocks:** Use spinlocks (`spin_lock_irqsave()`, `spin_unlock_irqrestore()`) for short-lived critical sections within interrupt handlers or where preemption is disabled. Use proper spinlock usage to protect against race conditions.
+    *   **Mutexes:**  Use mutexes (`mutex_lock()`, `mutex_unlock()`) for longer-lived critical sections and in cases where preemption is enabled.
+    *   **Read-Copy-Update (RCU):** Consider using RCU for read-mostly data structures to allow concurrent reads and updates without explicit locking.
+    *   **Atomic Operations:** Use atomic operations (e.g., `atomic_inc()`, `atomic_read()`) for simple, non-blocking operations on integer variables.
+
+5.  **Device Drivers (If Applicable):**
+    *   **`struct device` and `struct class`:** Use the standard device driver model by creating and registering devices using `device_create()`, `class_create()`, `device_register()`, etc.
+    *   **`file_operations` Structure:**  Implement the appropriate file operations (e.g., `open`, `read`, `write`, `ioctl`, `release`) for character or block device drivers.
+    *   **`probe()`, `remove()`, `suspend()`, `resume()`:** Implement these functions for device drivers that work with a PCI bus or similar.
+    *   **Resource Management:**  Correctly manage the device's resources (IRQ, memory, etc.) in the `probe()` and `remove()` functions.
+    *   **Interrupt Handling:**  Use `request_irq()` to register interrupt handlers. Ensure correct interrupt handling with proper disabling and enabling of interrupts.  Ensure that interrupt handlers are designed to run quickly and efficiently.
+    *   **DMA:** If applicable, use DMA correctly.
+
+6.  **Kernel Modules:**
+    *   **`module_init()` and `module_exit()`:** Use these macros to register and unregister module initialization and cleanup functions.
+    *   **`MODULE_LICENSE()`, `MODULE_AUTHOR()`, `MODULE_DESCRIPTION()`, `MODULE_VERSION()`:** Include these macros to provide module metadata.
+
+7. **Security Considerations:**
+    *   **Input Validation:**  Thoroughly validate all input data from userspace or other sources.  Never trust user-provided data.
+    *   **Privilege Levels:**  Use appropriate privilege levels and access controls to protect kernel resources.
+    *   **Memory Corruption:** Write robust code that prevents memory corruption.
+    *   **Race Conditions:**  Carefully avoid race conditions with locking and atomic operations.
+    *   **Buffer Overflows:**  Implement careful bounds checking to prevent buffer overflows.
+
+**Specific Requirements for Code Generation:**
+
+Provide the *exact* functionality requested, writing code that will compile and run correctly within a kernel environment. Assume access to all headers and macros found in the standard Linux kernel. Always follow the specified style and error handling practices meticulously.
+
+**Input Format:**
+
+The input will be a clear and concise description of the desired functionality.  For example:
+
+```text
+Implement a kernel module that allocates and deallocates a dynamically sized buffer, and provides functions to write to and read from the buffer. The module must handle allocation failures gracefully. It should provide a character device interface with read and write operations, and a debug interface to output its state.
+```
+
+**Output Format:**
+
+The output should be a complete, compilable C code file.  The file should include the necessary headers, define structures and functions, and implement the requested functionality. The code must be well-commented and adhere to all the style and error-handling requirements specified above.
+```
