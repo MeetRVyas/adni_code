@@ -57,7 +57,7 @@ class TrainingRunResult:
 
 
 def _instantiate(cfg: ComboConfig, num_classes: int, device: str,
-                  checkpoint_path: Optional[str], class_weights_tensor, pretrained: bool = True):
+                  checkpoint_path: Optional[str], class_weights_tensor):
     ClassifierClass = get_classifier(cfg.classifier_type)
     return ClassifierClass(
         model_name=cfg.model_name,
@@ -65,7 +65,6 @@ def _instantiate(cfg: ComboConfig, num_classes: int, device: str,
         device=device,
         checkpoint_path=checkpoint_path,
         class_weights_tensor=class_weights_tensor,
-        pretrained=pretrained,
     )
 
 
@@ -177,7 +176,7 @@ def train_combo(
         test_loader = build_loader(split.full_dataset, split.test_idx, batch_size, False,
                                     num_workers, pin_memory, persistent_workers)
 
-        eval_clf = _instantiate(cfg, len(class_names), device, None, None, pretrained=False)
+        eval_clf = _instantiate(cfg, len(class_names), device, None, None)
         checkpoint = weights_path if weights_path.exists() else best_fold_path
         eval_clf.load(str(checkpoint))
         logger.info(f"Loaded checkpoint : {checkpoint}")
