@@ -71,8 +71,14 @@ SAVE_BEST_ONLY = True
 SUBPROCESS_TIMEOUT = 8 * 3600
 
 # ── MLflow tracking ───────────────────────────────────────────────────────────
-MLFLOW_TRACKING_URI = "mlruns/"
-USE_MLFLOW = True  # Set False to use CSV-only logging (legacy behaviour)
+# PRD §8.1: toggle is the presence/absence of MLFLOW_TRACKING_URI, not a
+# hardcoded flag. Unset (default) -> module.training.tracking falls back to
+# local JSON/JSONL logging automatically; nothing else needs to change.
+# See module/training/tracking.py for the actual Strategy-pattern
+# implementation used by the new combo training scripts (train_efficientnet.py,
+# train_vit_evidential.py, train_resnext_baseline.py).
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "")
+USE_MLFLOW = bool(MLFLOW_TRACKING_URI.strip())
 
 # Create necessary directories
 os.makedirs(PLOTS_DIR, exist_ok=True)

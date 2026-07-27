@@ -1,21 +1,3 @@
-"""
-Training script for swin_base_patch4_window7_224.ms_in22k_ft_in1k +
-ProgressiveClassifier (combo #3 in the deployment PRD — introduces Dirichlet
-uncertainty quantification; this backbone is not used by any other combo;
-feeds the explain-path uncertainty readout in §8.4).
-
-Usage:
-    python train_swin.py
-    python train_swin.py --epochs 20 --nfolds 3     # quick smoke run
-
-Outputs (into saved_models/):
-    swin_best.pth
-    swin_class_names.txt
-
-Tracking: set MLFLOW_TRACKING_URI to log to MLflow; leave unset to log to
-saved_models/vit_evidential_metrics.jsonl instead (module/training/tracking.py).
-"""
-
 import argparse
 import sys
 from pathlib import Path
@@ -31,14 +13,6 @@ from module.config import (
 from module.utils import Logger
 from module.training import ComboConfig, train_combo, build_tracker
 
-COMBO = ComboConfig(
-    combo_id="swin_progressive",
-    display_name="Swin-Base + Progressive",
-    model_name="swin_base_patch4_window7_224.ms_in22k_ft_in1k",
-    classifier_type="progressive",
-    weights_filename="swin_best.pth",
-    class_names_filename="swin_class_names.txt",
-)
 SAVE_DIR = ROOT / "saved_models"
 
 
@@ -49,11 +23,30 @@ def _parse_args():
     p.add_argument("--nfolds", type=int, default=NFOLDS)
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--lr", type=float, default=LR)
+
+    p.add_argument("--combo_id", type=str, required = True)
+    p.add_argument("--model_name", type=str, required = True)
+    p.add_argument("--classifier_type", type=str, required = True)
+    p.add_argument("--display_name", type=str, default = None)
+    p.add_argument("--weights_filename", type=str, default = None)
+    p.add_argument("--class_names_filename", type=str, default = None)
     return p.parse_args()
 
 
+def _generate_config(args) :
+    return ComboConfig(
+        combo_id=args.combo_id,
+        display_name=args.display_name or f"{args.model_name.replace("_", " ").title()} {args.classifier_type.title()}",
+        model_name=args.model_name,
+        classifier_type=args.classifier_type,
+        weights_filename=args.wrights_filename or f"{args.model_name.split('.')[0]}_{args.classifier_type}_best.pth",
+        class_names_filename=args.class_names_filename or f"{args.model_name.split('.')[0]}_class_names.txt",
+    )
+
 def main():
     args = _parse_args()
+
+    COMBO = _generate_config(args)
     logger = Logger(COMBO.combo_id, file_name=COMBO.combo_id)
     tracker = build_tracker(COMBO.combo_id, SAVE_DIR)
 

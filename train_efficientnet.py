@@ -1,19 +1,23 @@
 """
-Training script for swin_base_patch4_window7_224.ms_in22k_ft_in1k +
-ProgressiveClassifier (combo #3 in the deployment PRD — introduces Dirichlet
-uncertainty quantification; this backbone is not used by any other combo;
-feeds the explain-path uncertainty readout in §8.4).
+Training script for tf_efficientnet_b4.ns_jft_in1k + ProgressiveClassifier
+(combo #2 in the deployment PRD — second-best empirical result from the
+research phase, flagship CNN counterpart to the swin combo).
+
+Depends on the §9 fix in module/classifiers/progressive_classifier.py
+(get_efficientnet_groups now has the same coverage-check safeguard
+get_swin_groups has) — run this only against that patched file.
 
 Usage:
-    python train_swin.py
-    python train_swin.py --epochs 20 --nfolds 3     # quick smoke run
+    python train_efficientnet.py
+    python train_efficientnet.py --epochs 20 --nfolds 3     # quick smoke run
+    python train_efficientnet.py --data_dir /path/to/images
 
 Outputs (into saved_models/):
-    swin_best.pth
-    swin_class_names.txt
+    effnet_progressive_best.pth
+    effnet_class_names.txt
 
 Tracking: set MLFLOW_TRACKING_URI to log to MLflow; leave unset to log to
-saved_models/vit_evidential_metrics.jsonl instead (module/training/tracking.py).
+saved_models/effnet_progressive_metrics.jsonl instead (module/training/tracking.py).
 """
 
 import argparse
@@ -32,12 +36,12 @@ from module.utils import Logger
 from module.training import ComboConfig, train_combo, build_tracker
 
 COMBO = ComboConfig(
-    combo_id="swin_progressive",
-    display_name="Swin-Base + Progressive",
-    model_name="swin_base_patch4_window7_224.ms_in22k_ft_in1k",
+    combo_id="effnet_progressive",
+    display_name="EfficientNet-B4 + Progressive",
+    model_name="tf_efficientnet_b4.ns_jft_in1k",
     classifier_type="progressive",
-    weights_filename="swin_best.pth",
-    class_names_filename="swin_class_names.txt",
+    weights_filename="effnet_progressive_best.pth",
+    class_names_filename="effnet_class_names.txt",
 )
 SAVE_DIR = ROOT / "saved_models"
 

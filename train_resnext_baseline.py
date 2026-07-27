@@ -1,19 +1,28 @@
 """
-Training script for swin_base_patch4_window7_224.ms_in22k_ft_in1k +
-ProgressiveClassifier (combo #3 in the deployment PRD — introduces Dirichlet
-uncertainty quantification; this backbone is not used by any other combo;
-feeds the explain-path uncertainty readout in §8.4).
+Training script for resnext50_32x4d.a1h_in1k + BaselineClassifier
+(combo #4 in the deployment PRD — deliberate control group: a vanilla
+fine-tune with no special technique, so the dashboard can substantiate a
+"technique X improved recall by Y points over baseline" claim).
+
+To switch to the alternative noted in PRD §6 (resnext50_32x4d +
+ProgressiveEvidentialClassifier, if you'd rather not ship a deliberately
+weaker baseline in the live demo), change CLASSIFIER_TYPE below to
+"progressive_evidential" — check its exact registry key in
+module/classifiers/__init__.py first. Note this alternative would also
+route through ArchitectureLayerGroups.get_resnet_groups (already verified
+in this same patch, see PROJECT_NOTES.md), so no additional pre-training
+fix is needed either way.
 
 Usage:
-    python train_swin.py
-    python train_swin.py --epochs 20 --nfolds 3     # quick smoke run
+    python train_resnext_baseline.py
+    python train_resnext_baseline.py --epochs 20 --nfolds 3     # quick smoke run
 
 Outputs (into saved_models/):
-    swin_best.pth
-    swin_class_names.txt
+    resnext_baseline_best.pth
+    resnext_class_names.txt
 
 Tracking: set MLFLOW_TRACKING_URI to log to MLflow; leave unset to log to
-saved_models/vit_evidential_metrics.jsonl instead (module/training/tracking.py).
+saved_models/resnext_baseline_metrics.jsonl instead (module/training/tracking.py).
 """
 
 import argparse
@@ -32,12 +41,12 @@ from module.utils import Logger
 from module.training import ComboConfig, train_combo, build_tracker
 
 COMBO = ComboConfig(
-    combo_id="swin_progressive",
-    display_name="Swin-Base + Progressive",
-    model_name="swin_base_patch4_window7_224.ms_in22k_ft_in1k",
-    classifier_type="progressive",
-    weights_filename="swin_best.pth",
-    class_names_filename="swin_class_names.txt",
+    combo_id="resnext_baseline",
+    display_name="ResNeXt50 + Baseline",
+    model_name="resnext50_32x4d.a1h_in1k",
+    classifier_type="baseline",
+    weights_filename="resnext_baseline_best.pth",
+    class_names_filename="resnext_class_names.txt",
 )
 SAVE_DIR = ROOT / "saved_models"
 

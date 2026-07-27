@@ -61,6 +61,55 @@ class ArchitectureLayerGroups:
     """
     
     @staticmethod
+    def _verify_full_coverage(model, groups, arch_name):
+        """
+        Shared safeguard, factored out so every architecture-specific grouping
+        function gets it for free instead of reimplementing it (previously only
+        get_swin_groups had this check).
+
+        Confirms every trainable parameter tensor in `model` was assigned to
+        exactly one discriminative-LR group. Raises loudly on any gap instead of
+        letting an incomplete grouping silently freeze part of the network
+        during progressive fine-tuning (a missing parameter simply never
+        receives a param_group / gradient update).
+        """
+        covered_ids = set()
+        duplicate_ids = set()
+        for group in groups:
+            for p in group:
+                if id(p) in covered_ids:
+                    duplicate_ids.add(id(p))
+                covered_ids.add(id(p))
+
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        trainable_ids = {id(p) for p in trainable}
+        missing_ids = trainable_ids - covered_ids
+
+        if missing_ids:
+            name_by_id = {id(p): n for n, p in model.named_parameters()}
+            sample = [name_by_id.get(i, "<unnamed>") for i in list(missing_ids)[:10]]
+            raise RuntimeError(
+                f"[{arch_name}] Layer-grouping coverage check failed: "
+                f"{len(missing_ids)} of {len(trainable)} trainable parameter tensors "
+                f"were not assigned to any discriminative-LR group, e.g. {sample}. "
+                f"Refusing to start training with an incomplete grouping."
+            )
+
+        if duplicate_ids:
+            name_by_id = {id(p): n for n, p in model.named_parameters()}
+            sample = [name_by_id.get(i, "<unnamed>") for i in list(duplicate_ids)[:10]]
+            print(
+                f"[{arch_name}] Warning: {len(duplicate_ids)} parameter tensor(s) were "
+                f"assigned to more than one group, e.g. {sample}. This does not raise "
+                f"because it can't silently drop gradients the way a missing parameter "
+                f"can, but it does mean that parameter's effective LR depends on optimizer "
+                f"param-group ordering — worth resolving before treating this mapping as final."
+            )
+
+        for i, group in enumerate(groups):
+            print(f"[{arch_name}] Group {i} -> {len(group)} parameter tensors")
+
+    @staticmethod
     def get_resnet_groups(model):
         """ResNet family layer groups."""
         groups = [
@@ -73,6 +122,7 @@ class ArchitectureLayerGroups:
             groups.append(list(model.fc.parameters()))
         else :
             groups.append([])
+        ArchitectureLayerGroups._verify_full_coverage(model, groups, "resnet")
         return groups
     
     @staticmethod
@@ -123,6 +173,7 @@ class ArchitectureLayerGroups:
             group4.extend(list(model.fc.parameters()))
         groups.append(group4)
         
+        ArchitectureLayerGroups._verify_full_coverage(model, groups, "vit")
         return groups
     
     @staticmethod
@@ -130,10 +181,7 @@ class ArchitectureLayerGroups:
         """Swin Transformer layer groups."""
         # We initialize 5 groups as per your original logic
         groups = [[] for _ in range(5)]
-        
-        # We use a set to track parameter IDs to ensure 100% coverage
-        param_ids = set()
-        
+
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
@@ -188,22 +236,7 @@ class ArchitectureLayerGroups:
                 print(f"Warning: Unknown parameter found: '{name}'. Assigning to Group 0.")
                 groups[0].append(param)
             
-            # Track ID
-            param_ids.add(id(param))
-    
-        # --- Robustness Check ---
-        # Ensure every single trainable parameter was assigned to a group
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        if len(param_ids) != len(trainable_params):
-            raise RuntimeError(
-                f"Grouping Error: Model has {len(trainable_params)} trainable params, "
-                f"but function only grouped {len(param_ids)}. "
-                "Check for frozen layers or shared parameters."
-        )
-
-        for i, group in enumerate(groups) :
-            print(f"Group {i} -> {len(group)}")
-    
+        ArchitectureLayerGroups._verify_full_coverage(model, groups, "swin")
         return groups
     
     @staticmethod
@@ -268,9 +301,7 @@ class ArchitectureLayerGroups:
         if hasattr(model, 'classifier'): append_params(4, model.classifier)
         elif hasattr(model, 'fc'):       append_params(4, model.fc) # Legacy fallback
 
-        for i, group in enumerate(groups) :
-            print(f"Group {i} -> {len(group)}")
-    
+        ArchitectureLayerGroups._verify_full_coverage(model, groups, "efficientnet")
         return groups
     
     @staticmethod
@@ -279,8 +310,8 @@ class ArchitectureLayerGroups:
         if hasattr(model, 'features'):
             features = model.features
             n_features = len(features)
-            
-            return [
+
+            groups = [
                 list(features[:n_features//4].parameters()),
                 list(features[n_features//4:n_features//2].parameters()),
                 list(features[n_features//2:3*n_features//4].parameters()),
@@ -288,16 +319,23 @@ class ArchitectureLayerGroups:
                 list(model.classifier.parameters()) if hasattr(model, 'classifier') else []
             ]
         else:
-            # Fallback
-            all_params = list(model.parameters())
+            # Fallback: unstructured even split. Coverage is trivially 100% here
+            # by construction (every trainable param is sliced into exactly one
+            # group), but the LR "grouping" carries no architectural meaning —
+            # kept only so mobilenet variants without a `.features` attribute
+            # don't crash outright.
+            all_params = [p for p in model.parameters() if p.requires_grad]
             n = len(all_params)
-            return [
+            groups = [
                 all_params[:n//5],
                 all_params[n//5:2*n//5],
                 all_params[2*n//5:3*n//5],
                 all_params[3*n//5:4*n//5],
                 all_params[4*n//5:]
             ]
+
+        ArchitectureLayerGroups._verify_full_coverage(model, groups, "mobilenet")
+        return groups
     
     @staticmethod
     def get_layer_groups(model, model_name):

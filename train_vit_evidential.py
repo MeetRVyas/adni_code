@@ -1,16 +1,16 @@
 """
-Training script for swin_base_patch4_window7_224.ms_in22k_ft_in1k +
-ProgressiveClassifier (combo #3 in the deployment PRD — introduces Dirichlet
+Training script for vit_base_patch16_224.augreg2_in21k_ft_in1k +
+EvidentialClassifier (combo #3 in the deployment PRD — introduces Dirichlet
 uncertainty quantification; this backbone is not used by any other combo;
 feeds the explain-path uncertainty readout in §8.4).
 
 Usage:
-    python train_swin.py
-    python train_swin.py --epochs 20 --nfolds 3     # quick smoke run
+    python train_vit_evidential.py
+    python train_vit_evidential.py --epochs 20 --nfolds 3     # quick smoke run
 
 Outputs (into saved_models/):
-    swin_best.pth
-    swin_class_names.txt
+    vit_evidential_best.pth
+    vit_class_names.txt
 
 Tracking: set MLFLOW_TRACKING_URI to log to MLflow; leave unset to log to
 saved_models/vit_evidential_metrics.jsonl instead (module/training/tracking.py).
@@ -32,12 +32,12 @@ from module.utils import Logger
 from module.training import ComboConfig, train_combo, build_tracker
 
 COMBO = ComboConfig(
-    combo_id="swin_progressive",
-    display_name="Swin-Base + Progressive",
-    model_name="swin_base_patch4_window7_224.ms_in22k_ft_in1k",
-    classifier_type="progressive",
-    weights_filename="swin_best.pth",
-    class_names_filename="swin_class_names.txt",
+    combo_id="vit_evidential",
+    display_name="ViT-Base + Evidential",
+    model_name="vit_base_patch16_224.augreg2_in21k_ft_in1k",
+    classifier_type="evidential",
+    weights_filename="vit_evidential_best.pth",
+    class_names_filename="vit_class_names.txt",
 )
 SAVE_DIR = ROOT / "saved_models"
 

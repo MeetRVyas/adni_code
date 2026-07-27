@@ -22,7 +22,9 @@ webdataset
 
 # ── Experiment tracking ───────────────────────────────────────────────────────
 mlflow
-                          # (Optional — falls back to CSV if missing)
+                          # (Optional — falls back to local JSON/JSONL if missing;
+                          # see module/training/tracking.py. Toggle is the
+                          # MLFLOW_TRACKING_URI environment variable, not a config flag.)
 
 # ── Quality checks ────────────────────────────────────────────────────────────
 scikit-learn
@@ -37,4 +39,25 @@ tensorboard
 timm
 ttach
 huggingface_hub
-pytorch_grad_camz
+grad-cam
+                          # (was "pytorch_grad_camz" — not a real package; the
+                          # correct PyPI name is "grad-cam", importable as
+                          # `pytorch_grad_cam`. This is also the only entry
+                          # actually exercised so far — module/visualization.py's
+                          # prior GradCAM was hand-rolled, not this library; the
+                          # new explainability pipeline in serving_app/ is what
+                          # finally uses it. See PROJECT_NOTES.md.)
+
+# ── ONNX export & quantization (new — export_onnx.py, benchmark_runtimes.py) ──
+onnx
+onnxscript
+                          # required by torch>=2.x's ONNX exporter even when
+                          # calling it with dynamo=False, which is what
+                          # module/training/onnx_export.py uses — see
+                          # PROJECT_NOTES.md for why dynamo=False was chosen.
+onnxruntime-openvino
+                          # NOT plain "onnxruntime" — this package provides both
+                          # CPUExecutionProvider and OpenVINOExecutionProvider in
+                          # one install, which benchmark_runtimes.py needs to be
+                          # able to compare. Installing plain "onnxruntime"
+                          # alongside this will conflict; use only this one.
