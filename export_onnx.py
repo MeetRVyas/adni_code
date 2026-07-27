@@ -47,7 +47,7 @@ def export_one(combo: dict, save_dir: Path) -> bool:
 
     ClassifierClass = get_classifier(combo["classifier_type"])
     clf = ClassifierClass(
-        model_name=combo["model_name"], num_classes=len(combo["class_names"]), device=DEVICE, pretrained=False
+        model_name=combo["model_name"], num_classes=len(combo["class_names"]), device=DEVICE
     )
     clf.load(str(weights_path))
     module = extract_exportable_module(clf)

@@ -29,21 +29,10 @@ from module.config import (
 )
 from module.training import ComboConfig, evaluate_combo, build_manifest_and_results, write_json
 
-# combo #1 was trained by the original train_swin.py, which predates the
-# ComboConfig abstraction — declared here (not imported) purely so this
-# script can treat all four combos uniformly.
-SWIN_COMBO = ComboConfig(
-    combo_id="swin_progressive",
-    display_name="Swin-B + Progressive",
-    model_name="swin_base_patch4_window7_224.ms_in22k_ft_in1k",
-    classifier_type="progressive",
-    weights_filename="swin_progressive_best.pth",
-    class_names_filename="swin_class_names.txt",
-)
-
 # The other three: import the exact ComboConfig each training script already
 # defines, rather than redeclaring (and risking drift from) the same metadata
 # a second time here.
+from train_swin import COMBO as SWIN_COMBO
 from train_efficientnet import COMBO as EFFNET_COMBO
 from train_vit_evidential import COMBO as VIT_COMBO
 from train_resnext_baseline import COMBO as RESNEXT_COMBO

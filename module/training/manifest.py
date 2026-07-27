@@ -115,7 +115,7 @@ def evaluate_combo(
 
     ClassifierClass = get_classifier(cfg.classifier_type)
     clf = ClassifierClass(
-        model_name=cfg.model_name, num_classes=len(split.class_names), device=device, pretrained=False
+        model_name=cfg.model_name, num_classes=len(split.class_names), device=device
     )
     clf.load(str(weights_path))
 

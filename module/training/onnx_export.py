@@ -53,7 +53,7 @@ def extract_exportable_module(classifier) -> nn.Module:
 
 def export_to_onnx(module: nn.Module, img_size: int, output_path: Path, opset: int = 17) -> None:
     module.eval()
-    dummy = torch.randn(1, 3, img_size, img_size)
+    dummy = torch.randn(1, 3, img_size, img_size, device = next(module.parameters()).device)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         torch.onnx.export(
@@ -97,11 +97,11 @@ def verify_onnx_parity(
     so it works even before real weights exist.
     """
     pytorch_module.eval()
-    dummy = torch.randn(num_samples, 3, img_size, img_size)
+    dummy = torch.randn(num_samples, 3, img_size, img_size, device = next(pytorch_module.parameters()).device)
     with torch.no_grad():
-        torch_out = pytorch_module(dummy).numpy()
+        torch_out = pytorch_module(dummy).cpu().numpy()
 
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    onnx_out = sess.run(None, {"pixel_values": dummy.numpy()})[0]
+    onnx_out = sess.run(None, {"pixel_values": dummy.cpu().numpy()})[0]
 
     return float(np.abs(torch_out - onnx_out).max())
