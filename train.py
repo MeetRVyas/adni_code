@@ -23,6 +23,8 @@ def _parse_args():
     p.add_argument("--nfolds", type=int, default=NFOLDS)
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--lr", type=float, default=LR)
+    p.add_argument("--patience", type=float, default=PATIENCE)
+    p.add_argument("--sam", type=float, default=False)
 
     p.add_argument("--combo_id", type=str, required = True)
     p.add_argument("--model_name", type=str, required = True)
@@ -59,8 +61,9 @@ def main():
         nfolds=args.nfolds,
         batch_size=args.batch_size,
         lr=args.lr,
-        patience=PATIENCE,
+        patience=args.patience,
         min_delta=MIN_DELTA_METRIC,
+        use_sam=args.sam,
         primary_metric=OPTIMIZE_METRIC,
         test_split=TEST_SPLIT,
         num_workers=NUM_WORKERS,
