@@ -53,6 +53,7 @@ def _parse_args():
     p.add_argument("--nfolds", type=int, default=NFOLDS)
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--lr", type=float, default=LR)
+    p.add_argument("--patience", type=float, default=PATIENCE)
     return p.parse_args()
 
 
@@ -70,7 +71,7 @@ def main():
         nfolds=args.nfolds,
         batch_size=args.batch_size,
         lr=args.lr,
-        patience=PATIENCE,
+        patience=args.patience,
         min_delta=MIN_DELTA_METRIC,
         primary_metric=OPTIMIZE_METRIC,
         test_split=TEST_SPLIT,
