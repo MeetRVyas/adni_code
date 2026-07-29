@@ -531,7 +531,7 @@ class ProgressiveClassifier(BaseClassifier):
         print(f"Optimizing for: {primary_metric.upper()}")
         print(f"{'='*80}\n")
 
-        remaining_epochs = min(epochs, 5)
+        remaining_epochs = epochs
 
         for i in range(1, self.phases) :
             print("="*80)
