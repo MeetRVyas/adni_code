@@ -399,6 +399,42 @@ class ProgressiveClassifier(BaseClassifier):
         self.architecture_type = 'transformer' if any(
             x in self.model_name.lower() for x in ['vit', 'swin', 'transformer']
         ) else 'cnn'
+
+        self.phases = 3
+        self.lr_multipliers = [1/100, 1/10, 1/3, 1.0, 10.0]
+
+        def _get_scheduler(optimizer, use_sam, epochs, **kwargs) :
+            return optim.lr_scheduler.OneCycleLR(
+                optimizer.base_optimizer if use_sam else optimizer,
+                max_lr=kwargs["max_lr"],
+                epochs=epochs,
+                steps_per_epoch=kwargs["steps_per_epoch"],
+                pct_start=0.3,
+                div_factor=25.0,
+                final_div_factor=1000.0
+            )
+
+        self._get_scheduler = _get_scheduler
+
+    def set_phases(self, phases : int) -> None :
+        self.phases = max(1, min(phases, 5))
+        print(f"Total Phases set: {self.phases}")
+
+    def set_sequential_scheduler(self) -> None :
+        def _get_scheduler(optimizer, use_sam, epochs, **kwargs) :
+            base_sched = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer.base_optimizer if use_sam else optimizer,
+                T_0=(epochs // 7) + 1, T_mult=2, eta_min=1e-7
+            )
+            warmup_sched = optim.lr_scheduler.LinearLR(
+                optimizer.base_optimizer if use_sam else optimizer,
+                start_factor=0.01, end_factor=1.0, total_iters=1  # ramps over epoch 1, given epoch-level .step()
+            )
+            return optim.lr_scheduler.SequentialLR(
+                optimizer.base_optimizer if use_sam else optimizer,
+                schedulers=[warmup_sched, base_sched], milestones=[1]
+            )
+        self._get_scheduler = _get_scheduler
     
     def forward(self, images):
         """Standard forward pass."""
@@ -438,7 +474,7 @@ class ProgressiveClassifier(BaseClassifier):
         """
         if self.class_weights_tensor is None:
             return None
-        return None if phase in (1, 2) else self.class_weights_tensor
+        return self.class_weights_tensor if phase == self.phases else None
     
     def _get_discriminative_params(self, base_lr):
         """
@@ -451,10 +487,9 @@ class ProgressiveClassifier(BaseClassifier):
         - Group 3 (late): base_lr
         - Group 4 (classifier): base_lr * 10
         """
-        lr_multipliers = [1/100, 1/10, 1/3, 1.0, 10.0]
         
         param_groups = []
-        for params, mult in zip(self.layer_groups, lr_multipliers):
+        for params, mult in zip(self.layer_groups, self.lr_multipliers):
             if params:
                 param_groups.append({
                     'params': params,
@@ -495,59 +530,41 @@ class ProgressiveClassifier(BaseClassifier):
         print(f"PROGRESSIVE FINE-TUNING: {self.model_name}")
         print(f"Optimizing for: {primary_metric.upper()}")
         print(f"{'='*80}\n")
-        
-        # Phase 1: Classifier only (5 epochs)
-        print("="*80)
-        print("PHASE 1: Training Classifier Only (Backbone Frozen)")
-        print("="*80)
-        
-        self._train_phase(
-            phase=1,
-            train_loader=self._build_balanced_loader(train_loader),
-            val_loader=val_loader,
-            epochs=min(5, epochs),
-            lr=lr * 10,  # Higher LR for random classifier
-            freeze_mode='classifier_only',
-            use_sam=False,
-            primary_metric=primary_metric,
-            patience=5,
-            min_delta=min_delta
-        )
-        
-        # Phase 2: Top 50% layers (10 epochs)
-        remaining_epochs = max(0, epochs - 5)
-        if remaining_epochs > 0:
-            print("\n" + "="*80)
-            print("PHASE 2: Fine-tuning Top Layers (Bottom 50% Frozen)")
+
+        remaining_epochs = min(epochs, 5)
+
+        for i in range(1, self.phases) :
+            print("="*80)
+            print(f"PHASE {i}")
             print("="*80)
             
             self._train_phase(
-                phase=2,
-                train_loader=train_loader,
+                phase=i,
+                train_loader=self._build_balanced_loader(train_loader),
                 val_loader=val_loader,
-                epochs=min(10, remaining_epochs),
-                lr=lr,
-                freeze_mode='top_50',
+                epochs=min(5 * i, remaining_epochs),
+                lr=lr,  # Higher LR for random classifier
                 use_sam=False,
                 primary_metric=primary_metric,
-                patience=10,
+                patience=5 * i,
                 min_delta=min_delta
             )
-        
-        # Phase 3: All layers with discriminative LRs (remaining epochs)
-        remaining_epochs = max(0, epochs - 15)
-        if remaining_epochs > 0:
+
+            remaining_epochs = max(0, remaining_epochs - 5 * i)
+            if remaining_epochs == 0 :
+                break
+        else :
+            # Final Phase: All layers with discriminative LRs (remaining epochs)
             print("\n" + "="*80)
             print("PHASE 3: Discriminative Fine-Tuning (All Layers)")
             print("="*80)
             
             self._train_phase(
-                phase=3,
+                phase=self.phases,
                 train_loader=train_loader,
                 val_loader=val_loader,
                 epochs=remaining_epochs,
                 lr=lr,
-                freeze_mode='all_discriminative',
                 use_sam=use_sam,  # SAM only in phase 3
                 primary_metric=primary_metric,
                 patience=patience,
@@ -564,43 +581,38 @@ class ProgressiveClassifier(BaseClassifier):
         return self.history
     
     def _train_phase(self, phase, train_loader, val_loader, epochs, lr,
-                    freeze_mode, use_sam, primary_metric, patience, min_delta):
+                    use_sam, primary_metric, patience, min_delta):
         """Train a single phase."""
         self.current_phase = phase  # read by compute_loss() -> _phase_class_weights()
+
+        if phase > 1:
+            self.load(self.checkpoint_path)
+            print(f"  Restored best checkpoint (recall={self.best_recall:.4f}) before Phase {phase}")
         
         # Freeze/unfreeze according to mode
-        if freeze_mode == 'classifier_only':
-            # Freeze all except classifier
+        if phase != self.phases:
             for param in self.model.parameters():
                 param.requires_grad = False
-            if self.layer_groups[-1]:
-                for param in self.layer_groups[-1]:
-                    param.requires_grad = True
+            grps = self.layer_groups[5 - phase:]
+            for grp in grps :
+                if grp:
+                    for param in grp:
+                        param.requires_grad = True
                     
-        elif freeze_mode == 'top_50':
-            # Unfreeze top 50%
-            for param in self.model.parameters() :
-                param.requires_grad = False
-            top_groups = self.layer_groups[2:]  # Groups 2, 3, 4
-            for group in top_groups:
-                for param in group:
-                    param.requires_grad = True
-                
-        elif freeze_mode == 'all_discriminative':
+            # Single LR
+            param_groups = filter(lambda p: p.requires_grad, self.model.parameters())
+
+            lr = lr * self.lr_multipliers[5 - phase]
+
+        else:
             # Unfreeze everything
             for param in self.model.parameters():
                 param.requires_grad = True
-        
-        # Create optimizer
-        if freeze_mode == 'all_discriminative':
             # Discriminative LRs
             param_groups = self._get_discriminative_params(lr)
             print(f"Discriminative LR groups:")
             for i, group in enumerate(param_groups):
                 print(f"  Group {i}: {len(list(group['params']))} params, LR={group['lr']:.2e}")
-        else:
-            # Single LR
-            param_groups = filter(lambda p: p.requires_grad, self.model.parameters())
         
         if use_sam:
             optimizer = SAM(param_groups, optim.AdamW, lr=lr, weight_decay=0.01, rho=0.05)
@@ -608,26 +620,14 @@ class ProgressiveClassifier(BaseClassifier):
             optimizer = optim.AdamW(param_groups, lr=lr, weight_decay=0.01)
         
         # Create scheduler
-        if self.architecture_type == 'cnn':
-            lr_multipliers = [1/100, 1/10, 1/3, 1.0, 10.0]
-            max_lr = [lr * m for m in lr_multipliers[:len(list(param_groups))]]
-
-            scheduler = optim.lr_scheduler.OneCycleLR(
-                optimizer.base_optimizer if use_sam else optimizer,
-                max_lr=max_lr if freeze_mode == 'all_discriminative' else lr * 10,  # Max LR for classifier
-                epochs=epochs,
-                steps_per_epoch=len(train_loader),
-                pct_start=0.3,
-                div_factor=25.0,
-                final_div_factor=1000.0
-            )
-        else:  # transformer
-            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer.base_optimizer if use_sam else optimizer,
-                T_0 = (epochs // 7) + 1,
-                T_mult = 2,
-                eta_min = 1e-7
-            )
+        max_lr = [lr * m for m in self.lr_multipliers[:len(list(param_groups))]]
+        scheduler = self._get_scheduler(
+            optimizer = optimizer,
+            use_sam = use_sam,
+            epochs = epochs,
+            max_lr = max_lr if phase == self.phases else lr * 10,
+            steps_per_epoch = len(train_loader),
+        )
         
         # Scaler
         scaler = torch.amp.GradScaler(enabled=(self.device == 'cuda' and not use_sam))

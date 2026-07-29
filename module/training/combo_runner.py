@@ -136,6 +136,10 @@ def train_combo(
 
             clf = _instantiate(cfg, len(class_names), device, str(weights_path), split.class_weights_tensor)
 
+            if hasattr(clf, "set_phases") :
+                clf.set_phases(4)
+                clf.set_sequential_scheduler()
+
             clf.fit(
                 train_loader=train_loader,
                 val_loader=val_loader,

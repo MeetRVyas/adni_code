@@ -174,11 +174,13 @@ class BaseClassifier(ABC):
                 outputs = self.forward(images)
                 loss = self.compute_loss(outputs, labels)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.first_step(zero_grad=True)
                 
                 outputs = self.forward(images)
                 loss = self.compute_loss(outputs, labels)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.second_step(zero_grad=True)
             else:
                 # Standard (with AMP if available)
@@ -187,12 +189,15 @@ class BaseClassifier(ABC):
                         outputs = self.forward(images)
                         loss = self.compute_loss(outputs, labels)
                     scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     outputs = self.forward(images)
                     loss = self.compute_loss(outputs, labels)
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     optimizer.step()
             
             # Scheduler step (for OneCycleLR)
