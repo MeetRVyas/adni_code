@@ -178,7 +178,7 @@ def train_combo(
                                     num_workers, pin_memory, persistent_workers)
 
         eval_clf = _instantiate(cfg, len(class_names), device, None, None)
-        checkpoint = weights_path if weights_path.exists() else best_fold_path
+        checkpoint = best_fold_path if best_fold_path.exists() else weights_path
         eval_clf.load(str(checkpoint))
         logger.info(f"Loaded checkpoint : {checkpoint}")
 

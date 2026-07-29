@@ -65,17 +65,18 @@ def load_and_split(data_dir: str, img_size: int, test_split: float, device: str)
     targets = np.array(full_dataset.targets)
     class_names = full_dataset.classes
 
-    class_counts = np.bincount(targets)
-    total_samples = len(targets)
-    class_weights = total_samples / (len(class_names) * class_counts)
-    class_weights_tensor = torch.FloatTensor(class_weights).to(device)
-
     train_val_idx, test_idx = train_test_split(
         np.arange(len(targets)),
         test_size=test_split,
         stratify=targets,
         random_state=RANDOM_SEED,
     )
+
+    tv_targets = targets[train_val_idx]
+    class_counts = np.bincount(tv_targets)
+    total_samples = len(tv_targets)
+    class_weights = total_samples / (len(class_names) * class_counts)
+    class_weights_tensor = torch.FloatTensor(class_weights).to(device)
 
     return SplitDataset(
         full_dataset=full_dataset,
