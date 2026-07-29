@@ -74,7 +74,7 @@ class BaseClassifier(ABC):
     def compute_loss(self, outputs, labels) -> torch.Tensor:
         """Compute loss from model outputs and labels."""
         pass
-
+    
 
     def update_class_weights(
         self,

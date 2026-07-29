@@ -372,11 +372,14 @@ class ProgressiveClassifier(BaseClassifier):
     Your sophisticated ProgressiveFineTuner converted to match BaseClassifier interface.
     
     Features:
-    - Phase 1 (5 epochs): Classifier only
-    - Phase 2 (10 epochs): Top 50% layers
-    - Phase 3 (15 epochs): All layers with discriminative LRs + optional SAM
+    - Phase 1 (5 epochs): Classifier only, trained on class-balanced batches
+      (WeightedRandomSampler via _build_balanced_loader) with an unweighted loss
+    - Phase 2 (10 epochs): Top 50% layers, natural distribution, unweighted loss
+    - Phase 3 (15 epochs): All layers with discriminative LRs + optional SAM,
+      natural distribution, full effective-number class weights
     - Architecture-aware layer grouping
-    - Focal Loss
+    - Focal Loss, with LDAM-DRW-style deferred reweighting across the 3 phases
+      (see compute_loss/_phase_class_weights)
     """
     
     def build_model(self):
@@ -402,10 +405,40 @@ class ProgressiveClassifier(BaseClassifier):
         return self.model(images)
     
     def compute_loss(self, outputs, labels):
-        """Focal Loss for hard examples."""
-        if not hasattr(self, 'focal_loss'):
-            self.focal_loss = FocalLoss(alpha=1.0, gamma=2.0, weights=self.class_weights_tensor).to(self.device)
+        """
+        Focal Loss for hard examples, with LDAM-DRW-style deferred
+        reweighting (Cao et al., "Learning Imbalanced Datasets with
+        Label-Distribution-Aware Margin Loss", https://arxiv.org/abs/1906.07413):
+        applying full class weights from epoch 1 can hurt the initial
+        representation, so weight strength is scheduled by phase rather than
+        fixed for the whole run.
+        """
+        phase = getattr(self, 'current_phase', 3)  # default to full weighting if called outside _train_phase
+        target_weights = self._phase_class_weights(phase)
+
+        weights_changed = (
+            not hasattr(self, 'focal_loss')
+            or getattr(self, '_focal_loss_weights_id', None) is not (
+                id(target_weights) if target_weights is not None else None
+            )
+        )
+        if weights_changed:
+            self.focal_loss = FocalLoss(alpha=1.0, gamma=2.0, weights=target_weights).to(self.device)
+            self._focal_loss_weights_id = id(target_weights) if target_weights is not None else None
         return self.focal_loss(outputs, labels)
+
+    def _phase_class_weights(self, phase):
+        """
+        Phase 1/2: no class weighting (uniform) — classifier warm-up (Phase 1)
+        and top-layer fine-tuning (Phase 2) train on the natural distribution
+        with an unweighted loss, so early representation learning isn't
+        distorted by aggressive reweighting before the model has learned
+        anything useful to reweight.
+        Phase 3: full effective-number class weights.
+        """
+        if self.class_weights_tensor is None:
+            return None
+        return None if phase in (1, 2) else self.class_weights_tensor
     
     def _get_discriminative_params(self, base_lr):
         """
@@ -429,6 +462,26 @@ class ProgressiveClassifier(BaseClassifier):
                 })
         
         return param_groups
+
+    def _build_balanced_loader(self, train_loader):
+        """
+        Phase 1 only: retrain the classifier head on a class-balanced view of
+        the data rather than the natural distribution, following the
+        "decoupling representation and classifier" approach for long-tailed
+        recognition (Kang et al., https://arxiv.org/abs/1910.09217.
+        """
+        from torch.utils.data import DataLoader
+        from module.training.data_split import class_balanced_sampler
+
+        subset = train_loader.dataset  # a torch.utils.data.Subset(full_dataset, indices)
+        sampler = class_balanced_sampler(subset.dataset, np.array(subset.indices))
+        return DataLoader(
+            subset,
+            batch_size=train_loader.batch_size,
+            sampler=sampler,
+            num_workers=train_loader.num_workers,
+            pin_memory=train_loader.pin_memory,
+        )
     
     def fit(self, train_loader, val_loader, epochs=30, lr=1e-4,
             use_sam=True, primary_metric='recall',
@@ -450,7 +503,7 @@ class ProgressiveClassifier(BaseClassifier):
         
         self._train_phase(
             phase=1,
-            train_loader=train_loader,
+            train_loader=self._build_balanced_loader(train_loader),
             val_loader=val_loader,
             epochs=min(5, epochs),
             lr=lr * 10,  # Higher LR for random classifier
@@ -513,6 +566,7 @@ class ProgressiveClassifier(BaseClassifier):
     def _train_phase(self, phase, train_loader, val_loader, epochs, lr,
                     freeze_mode, use_sam, primary_metric, patience, min_delta):
         """Train a single phase."""
+        self.current_phase = phase  # read by compute_loss() -> _phase_class_weights()
         
         # Freeze/unfreeze according to mode
         if freeze_mode == 'classifier_only':
