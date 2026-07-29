@@ -585,9 +585,9 @@ class ProgressiveClassifier(BaseClassifier):
         """Train a single phase."""
         self.current_phase = phase  # read by compute_loss() -> _phase_class_weights()
 
-        # if phase > 1:
-        #     self.load(self.checkpoint_path)
-        #     print(f"  Restored best checkpoint (recall={self.best_recall:.4f}) before Phase {phase}")
+        if phase > 1:
+            self.load(self.checkpoint_path)
+            print(f"  Restored best checkpoint (recall={self.best_recall:.4f}) before Phase {phase}")
         
         # Freeze/unfreeze according to mode
         if phase != self.phases:
@@ -661,13 +661,6 @@ class ProgressiveClassifier(BaseClassifier):
             })
 
             print(f"[Epoch {epoch+1}] **{val_recall:.3f}**")
-            print(
-                f"Train: L={train_loss:.4f} A={train_acc:.2f}% R={train_recall:.3f} | "
-                f"Val: L={val_loss:.4f} A={val_acc:.2f}% "
-                f"P={val_prec:.3f} R={val_recall:.3f} F1={val_f1:.3f}"
-            )
-            print(f"Per-class Recall: {[f'{r:.3f}' for r in per_class_recall]}")
-            
             
             # Check improvement
             improved = False
@@ -701,5 +694,14 @@ class ProgressiveClassifier(BaseClassifier):
             # Step scheduler (if not OneCycleLR)
             if not isinstance(scheduler, optim.lr_scheduler.OneCycleLR):
                 scheduler.step()
+
+        for h in self.history :
+            if h["phase"] == phase :
+                print(
+                    f"Train: L={h["train_loss"]:.4f} A={h["train_acc"]:.2f}% R={h["train_recall"]:.3f} | "
+                    f"Val: L={h["val_loss"]:.4f} A={h["val_acc"]:.2f}% "
+                    f"P={h["val_prec"]:.3f} R={h["val_recall"]:.3f} F1={h["val_f1"]:.3f}"
+                )
+                print(f"Per-class Recall: {[f'{r:.3f}' for r in h["per_class_recall"]]}")
         
         print(f"âœ… Phase {phase} Complete - Best {primary_metric}: {self.best_metric_value:.4f}")
