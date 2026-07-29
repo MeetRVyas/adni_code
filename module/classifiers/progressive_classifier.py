@@ -556,7 +556,7 @@ class ProgressiveClassifier(BaseClassifier):
         else :
             # Final Phase: All layers with discriminative LRs (remaining epochs)
             print("\n" + "="*80)
-            print("PHASE 3: Discriminative Fine-Tuning (All Layers)")
+            print("Final PHASE: Discriminative Fine-Tuning (All Layers)")
             print("="*80)
             
             self._train_phase(
@@ -585,9 +585,9 @@ class ProgressiveClassifier(BaseClassifier):
         """Train a single phase."""
         self.current_phase = phase  # read by compute_loss() -> _phase_class_weights()
 
-        if phase > 1:
-            self.load(self.checkpoint_path)
-            print(f"  Restored best checkpoint (recall={self.best_recall:.4f}) before Phase {phase}")
+        # if phase > 1:
+        #     self.load(self.checkpoint_path)
+        #     print(f"  Restored best checkpoint (recall={self.best_recall:.4f}) before Phase {phase}")
         
         # Freeze/unfreeze according to mode
         if phase != self.phases:
