@@ -588,7 +588,7 @@ class ProgressiveClassifier(BaseClassifier):
             )
             
             # Validate
-            val_loss, val_acc, val_recall, val_prec, val_f1, primary_value = self.validate_epoch(val_loader)
+            val_loss, val_acc, val_recall, val_prec, val_f1, primary_value, per_class_recall = self.validate_epoch(val_loader)
             
             # Record history
             self.history.append({
@@ -602,8 +602,18 @@ class ProgressiveClassifier(BaseClassifier):
                 'val_recall': val_recall,
                 'val_precision': val_prec,
                 'val_f1': val_f1,
+                'val_per_class_recall': per_class_recall,
                 f'val_{primary_metric}': primary_value
             })
+
+            print(f"[Epoch {epoch+1}] **{val_recall:.3f}**")
+            print(
+                f"Train: L={train_loss:.4f} A={train_acc:.2f}% R={train_recall:.3f} | "
+                f"Val: L={val_loss:.4f} A={val_acc:.2f}% "
+                f"P={val_prec:.3f} R={val_recall:.3f} F1={val_f1:.3f}"
+            )
+            print(f"Per-class Recall: {[f'{r:.3f}' for r in per_class_recall]}")
+            
             
             # Check improvement
             improved = False

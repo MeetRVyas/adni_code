@@ -74,8 +74,41 @@ class BaseClassifier(ABC):
     def compute_loss(self, outputs, labels) -> torch.Tensor:
         """Compute loss from model outputs and labels."""
         pass
+
+
+    def update_class_weights(
+        self,
+        per_class_recall: np.ndarray,
+        target_recall: float = 1.0,
+        weight_lr: float = 0.1,
+        min_weight: float = 0.1,
+        max_weight: float = 50.0
+    ):
+        """
+        Adjusts class weights based on recall gap.
+        Classes below target_recall get higher weights, above get lower.
+        
+        Formula: new_weight = old_weight * (1 + weight_lr * recall_gap)
+        recall_gap = target_recall - current_recall  (positive = underperforming)
+        """
+        if self.class_weights_tensor is None:
+            self.class_weights_tensor = torch.ones(self.num_classes).to(self.device)
+        
+        weights = self.class_weights_tensor.cpu().numpy().copy()
+        
+        for i, recall in enumerate(per_class_recall):
+            recall_gap = target_recall - recall  # positive if underperforming
+            adjustment = 1.0 + weight_lr * recall_gap
+            weights[i] = np.clip(weights[i] * adjustment, min_weight, max_weight)
+        
+        # Re-normalize so mean stays at 1 (prevents unbounded growth)
+        weights = weights / weights.mean()
+        
+        self.class_weights_tensor = torch.FloatTensor(weights).to(self.device)
+        return weights
     
-    def get_predictions(self, outputs, use_weights: bool = True, use_activation: bool = True) -> torch.Tensor:
+    
+    def get_predictions(self, outputs, use_weights: bool = False, use_activation: bool = True) -> torch.Tensor:
         """
         Convert model outputs to class predictions.
         
@@ -211,8 +244,9 @@ class BaseClassifier(ABC):
         precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
         f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
         primary_value = self._get_metric_value(all_labels, all_preds, primary_metric)
+        per_class_recall = recall_score(all_labels, all_preds, average=None, zero_division=0)
         
-        return avg_loss, acc, recall, precision, f1, primary_value
+        return avg_loss, acc, recall, precision, f1, primary_value, per_class_recall
     
     def fit(self, train_loader, val_loader, epochs: int = 30, 
             lr: float = 1e-4, use_sam: bool = False,
@@ -270,7 +304,7 @@ class BaseClassifier(ABC):
             )
             
             # Validate
-            val_loss, val_acc, val_recall, val_prec, val_f1, primary_value = self.validate_epoch(val_loader)
+            val_loss, val_acc, val_recall, val_prec, val_f1, primary_value, per_class_recall = self.validate_epoch(val_loader)
             
             # Record history
             self.history.append({
@@ -283,8 +317,17 @@ class BaseClassifier(ABC):
                 'val_recall': val_recall,
                 'val_precision': val_prec,
                 'val_f1': val_f1,
+                'val_per_class_recall': per_class_recall,
                 f'val_{primary_metric}': primary_value
             })
+
+            print(f"[Epoch {epoch+1}] **{val_recall:.3f}**")
+            print(
+                f"Train: L={train_loss:.4f} A={train_acc:.2f}% R={train_recall:.3f} | "
+                f"Val: L={val_loss:.4f} A={val_acc:.2f}% "
+                f"P={val_prec:.3f} R={val_recall:.3f} F1={val_f1:.3f}"
+            )
+            print(f"Per-class Recall: {[f'{r:.3f}' for r in per_class_recall]}")
             
             # Check improvement
             improved = False
