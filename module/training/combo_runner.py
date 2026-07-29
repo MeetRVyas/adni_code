@@ -138,7 +138,7 @@ def train_combo(
 
             if hasattr(clf, "set_phases") :
                 clf.set_phases(4)
-                clf.set_sequential_scheduler()
+                # clf.set_sequential_scheduler()
 
             clf.fit(
                 train_loader=train_loader,
