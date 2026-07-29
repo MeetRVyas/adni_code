@@ -163,7 +163,7 @@ class BaseClassifier(ABC):
         is_sam = isinstance(optimizer, SAM)
         use_amp = not is_sam and self.device == 'cuda'
         
-        for images, labels in tqdm(train_loader, desc="Training", leave=False):
+        for images, labels in train_loader:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
             
@@ -229,7 +229,7 @@ class BaseClassifier(ABC):
         all_preds, all_labels = [], []
         
         with torch.inference_mode():
-            for images, labels in tqdm(val_loader, desc="Validating", leave=False):
+            for images, labels in val_loader:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
                 
@@ -396,7 +396,7 @@ class BaseClassifier(ABC):
         all_preds, all_probs, all_labels = [], [], []
         
         with torch.inference_mode():
-            for images, labels in tqdm(test_loader, desc="Testing"):
+            for images, labels in test_loader:
                 images = images.to(self.device)
                 outputs = self.forward(images)
                 probs = torch.softmax(outputs, dim=1)
