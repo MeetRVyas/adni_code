@@ -32,6 +32,7 @@ from module.classifiers import get_classifier
 from module.models import get_img_size
 from module.training.data_split import SplitDataset, build_loader, load_and_split
 from module.training.tracking import ExperimentTracker
+from module.training.landscape import generate_interactive_landscape
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ def train_combo(
     patience: int,
     min_delta: float,
     use_sam: bool,
+    landscape: bool,
     primary_metric: str,
     test_split: float,
     num_workers: int,
@@ -89,6 +91,7 @@ def train_combo(
     persistent_workers: bool,
     logger,
     tracker: ExperimentTracker,
+    **kwargs
 ) -> TrainingRunResult:
     save_dir.mkdir(parents=True, exist_ok=True)
     weights_path = save_dir / cfg.weights_filename
@@ -138,8 +141,7 @@ def train_combo(
             clf = _instantiate(cfg, len(class_names), device, str(weights_path), split.class_weights_tensor)
 
             if hasattr(clf, "set_phases") :
-                clf.set_phases(4)
-                # clf.set_sequential_scheduler()
+                clf.set_phases(kwargs["phases"])
 
             clf.fit(
                 train_loader=train_loader,
@@ -151,6 +153,26 @@ def train_combo(
                 patience=patience,
                 min_delta=min_delta,
             )
+
+            clf.load(str(weights_path))
+            
+            html_out = save_dir / "interactive_plots" / f"{cfg.combo_id}_fold{fold}_landscape.html"
+            html_out.parent.mkdir(parents = True, exist_ok = True)
+
+            if landscape :
+                if clf._snapshots :
+                    landscape_success = generate_interactive_landscape(
+                        clf=clf, 
+                        snapshots=clf._snapshots,
+                        val_loader=val_loader,
+                        device=device, 
+                        out_path=str(html_out)
+                    )
+                    if landscape_success:
+                        logger.info(f"Interactive landscape saved -> {html_out}")
+                        tracker.log_artifact(str(html_out))  # If your tracker supports file logging
+                else :
+                    logger.info("Snapshots not found")
 
             fold_metrics = {
                 "fold": fold,

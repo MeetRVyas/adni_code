@@ -705,3 +705,6 @@ class ProgressiveClassifier(BaseClassifier):
                 print(f"Per-class Recall: {[f'{r:.3f}' for r in h['val_per_class_recall']]}")
         
         print(f"âœ… Phase {phase} Complete - Best {primary_metric}: {self.best_metric_value:.4f}")
+
+        # Inside your BaseClassifier / Progressive Classifier's training phase loop:
+        self._snapshots[phase] = {k: v.clone().cpu() for k, v in self.model.state_dict().items()}

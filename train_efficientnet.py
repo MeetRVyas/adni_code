@@ -55,6 +55,7 @@ def _parse_args():
     p.add_argument("--lr", type=float, default=LR)
     p.add_argument("--patience", type=float, default=PATIENCE)
     p.add_argument("--sam", type=float, default=False)
+    p.add_argument("--landscape", type=float, default=False)
     return p.parse_args()
 
 
@@ -75,6 +76,7 @@ def main():
         patience=args.patience,
         min_delta=MIN_DELTA_METRIC,
         use_sam=args.sam,
+        landscape=args.landscape,
         primary_metric=OPTIMIZE_METRIC,
         test_split=TEST_SPLIT,
         num_workers=NUM_WORKERS,

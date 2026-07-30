@@ -51,6 +51,7 @@ class BaseClassifier(ABC):
         self.best_f1 = 0.0
         self.best_epoch = 0
         self.history = []
+        self._snapshots = {}
         
         # Build model
         self.build_model()
@@ -301,6 +302,10 @@ class BaseClassifier(ABC):
         print(f"Training {self.__class__.__name__} - {self.model_name}")
         print(f"Optimizing for: {primary_metric.upper()} (primary)")
         print(f"{'='*80}\n")
+
+        # We want ~10 frames total to keep computation fast.
+        snapshot_freq = max(1, epochs // 10) 
+
         
         for epoch in range(epochs):
             # Train
@@ -378,6 +383,11 @@ class BaseClassifier(ABC):
             # Step scheduler
             if not isinstance(scheduler, (optim.lr_scheduler.OneCycleLR, optim.lr_scheduler.SequentialLR)):
                 scheduler.step()
+
+            if epoch % snapshot_freq == 0 or epoch == epochs:
+                self._snapshots[f"Epoch {epoch}"] = {
+                    k: v.clone().cpu() for k, v in self.model.state_dict().items()
+                }
         
         print(f"\n{'='*80}")
         print(f"Training Complete!")
