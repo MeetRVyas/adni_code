@@ -700,7 +700,7 @@ class ProgressiveClassifier(BaseClassifier):
                 print(
                     f"Train: L={h['train_loss']:.4f} A={h['train_acc']:.2f}% R={h['train_recall']:.3f} | "
                     f"Val: L={h['val_loss']:.4f} A={h['val_acc']:.2f}% "
-                    f"P={h['val_prec']:.3f} R={h['val_recall']:.3f} F1={h['val_f1']:.3f}"
+                    f"P={h['val_precision']:.3f} R={h['val_recall']:.3f} F1={h['val_f1']:.3f}"
                 )
                 print(f"Per-class Recall: {[f'{r:.3f}' for r in h['per_class_recall']]}")
         
