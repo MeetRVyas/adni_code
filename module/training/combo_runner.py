@@ -22,6 +22,7 @@ import gc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -163,7 +164,7 @@ def train_combo(
 
             if clf.best_metric_value > best_fold_val:
                 best_fold_val = clf.best_metric_value
-                clf.save(str(best_fold_path))
+                shutil.copy(str(weights_path), str(best_fold_path)) # copy the peak file
                 logger.info(f"  * New best fold ({best_fold_val:.4f}) — checkpoint updated")
 
             del clf, train_loader, val_loader
@@ -178,11 +179,16 @@ def train_combo(
 
         # ── Final held-out test evaluation ──────────────────────────────────
         logger.info("\nFinal held-out test evaluation...")
+
+        if best_fold_path.exists():
+            shutil.copy(str(best_fold_path), str(weights_path)) # sync best-fold peak back into weights_path
+            logger.info(f"Synced best-fold checkpoint -> {weights_path} (best fold val={best_fold_val:.4f})")
+
         test_loader = build_loader(split.full_dataset, split.test_idx, batch_size, False,
                                     num_workers, pin_memory, persistent_workers)
 
         eval_clf = _instantiate(cfg, len(class_names), device, None, None)
-        checkpoint = best_fold_path if best_fold_path.exists() else weights_path
+        checkpoint = weights_path
         eval_clf.load(str(checkpoint))
         logger.info(f"Loaded checkpoint : {checkpoint}")
 
