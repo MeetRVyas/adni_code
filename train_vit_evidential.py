@@ -52,6 +52,7 @@ def _parse_args():
     p.add_argument("--patience", type=float, default=PATIENCE)
     p.add_argument("--sam", type=float, default=False)
     p.add_argument("--landscape", type=float, default=False)
+    p.add_argument("--model", type=str, default=None)
     return p.parse_args()
 
 
@@ -60,6 +61,9 @@ def main():
     logger = Logger(COMBO.combo_id, file_name=COMBO.combo_id)
     tracker = build_tracker(COMBO.combo_id, SAVE_DIR)
 
+    if args.model :
+        COMBO.model_name = args.model
+    
     result = train_combo(
         COMBO,
         data_dir=args.data_dir,
