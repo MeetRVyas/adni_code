@@ -20,6 +20,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from dataclasses import replace
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
@@ -61,8 +63,10 @@ def main():
     logger = Logger(COMBO.combo_id, file_name=COMBO.combo_id)
     tracker = build_tracker(COMBO.combo_id, SAVE_DIR)
 
+    combo = COMBO
+
     if args.model :
-        COMBO.model_name = args.model
+        combo = replace(COMBO, model_name = args.model)
     
     result = train_combo(
         COMBO,
