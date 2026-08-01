@@ -49,10 +49,11 @@ def _parse_args():
     p.add_argument("--nfolds", type=int, default=NFOLDS)
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--lr", type=float, default=LR)
-    p.add_argument("--patience", type=float, default=PATIENCE)
-    p.add_argument("--sam", type=float, default=False)
-    p.add_argument("--phases", type=float, default=3)
-    p.add_argument("--landscape", type=float, default=False)
+    p.add_argument("--patience", type=int, default=PATIENCE)
+    p.add_argument("--sam", type=bool, default=False)
+    p.add_argument("--phases", type=int, default=3)
+    p.add_argument("--landscape", type=bool, default=False)
+    p.add_argument("--model", type=str, default=None)
     return p.parse_args()
 
 
@@ -60,6 +61,9 @@ def main():
     args = _parse_args()
     logger = Logger(COMBO.combo_id, file_name=COMBO.combo_id)
     tracker = build_tracker(COMBO.combo_id, SAVE_DIR)
+
+    if args.model :
+        COMBO.model_name = args.model
 
     result = train_combo(
         COMBO,
