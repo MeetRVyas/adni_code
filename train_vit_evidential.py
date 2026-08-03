@@ -69,7 +69,7 @@ def main():
         combo = replace(COMBO, model_name = args.model)
     
     result = train_combo(
-        COMBO,
+        combo,
         data_dir=args.data_dir,
         save_dir=SAVE_DIR,
         device=DEVICE,
