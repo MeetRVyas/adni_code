@@ -60,6 +60,7 @@ class BaseClassifier(ABC):
             raise ValueError("build_model() must set self.model")
         
         self.model = self.model.to(device)
+        self.model.set_grad_checkpointing(True)
     
     @abstractmethod
     def build_model(self):
