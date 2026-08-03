@@ -1,6 +1,12 @@
 import timm
 
 RECOMMENDED_IMG_SIZES = {
+    "swinv2_base_window12to24_192to384": 384,
+    "tf_efficientnetv2_l": 384,
+    "maxvit_base_tf_384": 384,
+    "regnety_160": 384,
+    "convnextv2_base": 384,
+    "tf_efficientnetv2_m": 384,
     "tf_efficientnet_b4": 380, 
     "tf_efficientnetv2_s": 300, 
     "inception_v3": 299, 
