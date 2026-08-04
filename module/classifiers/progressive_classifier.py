@@ -303,6 +303,77 @@ class ArchitectureLayerGroups:
 
         ArchitectureLayerGroups._verify_full_coverage(model, groups, "efficientnet")
         return groups
+
+    @staticmethod
+    def get_convnext_groups(model):
+        """ConvNeXt (V1 and V2) layer groups.
+
+        Both versions share the same top-level timm module tree (stem / stages /
+        norm_pre / head) — V2 only changes what's *inside* each block (GRN instead
+        of LayerScale), which prefix-matching at this level never sees. One method
+        covers both.
+        """
+        groups = [[] for _ in range(5)]
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            # --- Logic matching your original context ---
+
+            # Group 0: Stem
+            # timm ConvNeXt names the patchify stem "stem" (conv + norm)
+            if name.startswith('stem.'):
+                groups[0].append(param)
+
+            # Stages (Stage 0-3)
+            elif name.startswith('stages.'):
+                # name format is "stages.X.blocks..." or "stages.X.downsample..."
+                try:
+                    # Extract the stage index (0, 1, 2, or 3)
+                    stage_idx = int(name.split('.')[1])
+
+                    if stage_idx == 0:
+                        # Context: Group 0 includes Stage 0 (stem + first stage)
+                        groups[0].append(param)
+                    elif stage_idx == 1:
+                        groups[1].append(param)
+                    elif stage_idx == 2:
+                        groups[2].append(param)
+                    elif stage_idx == 3:
+                        groups[3].append(param)
+                    else:
+                        # Fallback: ConvNeXt is always 4 stages in practice, but if a
+                        # future variant ever has more, put the extras in Group 3
+                        groups[3].append(param)
+
+                except (IndexError, ValueError):
+                    print(f"Warning: Could not parse stage index for {name}. Assigning to Group 0.")
+                    groups[0].append(param)
+
+            # Group 3: final pre-head normalization
+            # For almost all convnext/convnextv2 configs this norm is folded into
+            # the head as `head.norm` (NormMlpClassifierHead does pool->norm->fc).
+            # A few experimental "hnf" (head_norm_first) variants instead expose it
+            # as a top-level `norm_pre`. Either way it's the same normalization the
+            # spec means by "final pre-head normalizations" — catch both forms.
+            elif name.startswith('norm_pre.') or name.startswith('head.norm.'):
+                groups[3].append(param)
+
+            # Group 4: Head
+            # Everything else under `head.` — head.fc, plus head.pre_logits.fc on
+            # the handful of variants (e.g. convnext_large_mlp) that add a hidden
+            # MLP layer before the classifier.
+            elif name.startswith('head.'):
+                groups[4].append(param)
+
+            # Catch-all
+            else:
+                print(f"Warning: Unknown parameter found: '{name}'. Assigning to Group 0.")
+                groups[0].append(param)
+
+        ArchitectureLayerGroups._verify_full_coverage(model, groups, "convnext")
+        return groups
     
     @staticmethod
     def get_mobilenet_groups(model):
@@ -352,6 +423,8 @@ class ArchitectureLayerGroups:
             return ArchitectureLayerGroups.get_efficientnet_groups(model)
         elif 'mobilenet' in model_name_lower:
             return ArchitectureLayerGroups.get_mobilenet_groups(model)
+        elif 'convnext' in model_name_lower:
+            return ArchitectureLayerGroups.get_convnext_groups(model)
         else:
             # Generic fallback
             all_params = list(model.parameters())

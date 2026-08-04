@@ -164,6 +164,9 @@ class UniversalEvidentialModel(nn.Module):
         
         # Evidential head
         self.evidential_head = EvidentialLayer(in_features, num_classes)
+
+    def set_grad_checkpointing(self, flag : bool) -> None :
+        self.feature_extractor.set_grad_checkpointing(flag)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Returns evidence (not probabilities!)."""
